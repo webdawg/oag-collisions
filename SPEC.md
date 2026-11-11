@@ -52,6 +52,8 @@ of the black hole that holds it back, riding an infinite line across the univers
 energy in the form of what the fusion reaction creates: force. The boundary to the rest of the
 universe is closer than we think.
 
+Supernovae are collisions. Gravitational waves have data.
+
 ## What this explicitly is not
 
 - **Not a claim that information travels faster than light.** It does not. The idea above is that a
