@@ -3,8 +3,9 @@
 //! Run with `cargo run --example aberration`.
 
 use oag_collisions::aberration::{
-    aberration_constant, drift, lightspeed_drift, measured_drift, AberrationDrift, AU,
-    EARTH_ORBITAL_SPEED, IAU_ABERRATION_CONSTANT, C, SUN_ORBITAL_SPEED,
+    aberration_constant, cmb_dipole_speed, drift, lightspeed_drift, measured_drift, AberrationDrift,
+    AU, CMB_DIPOLE_AMPLITUDE, CMB_TEMPERATURE, EARTH_ORBITAL_SPEED, IAU_ABERRATION_CONSTANT, C,
+    SUN_ORBITAL_SPEED,
 };
 
 fn main() {
@@ -67,5 +68,28 @@ fn main() {
     println!(
         "  ratio to galactic      {:>12.3e}",
         (earth.degrees_per_year * 3600.0) / (measured.degrees_per_year * 3600.0)
+    );
+
+    // Third measurement, sharing no method with either of the above: the CMB dipole. The solar
+    // system's motion Doppler-shifts the oldest light in the universe, and the temperature
+    // difference between the hot and cold directions is v/c.
+    println!();
+    println!("third measurement: the cosmic microwave background");
+    println!("---------------------------------------------------");
+    println!(
+        "cmb temperature          {:>12.4} K   dipole {:>10.4} mK",
+        CMB_TEMPERATURE,
+        CMB_DIPOLE_AMPLITUDE * 1000.0
+    );
+    // Note this is the solar system's TOTAL speed relative to the CMB, not its galactic orbital
+    // speed -- it includes the galaxy's own motion through the universe. So it is not fed through
+    // the orbital-drift formula; it stands as an independent speed measurement.
+    println!(
+        "  solar speed vs cmb     {:>12.1} km/s",
+        cmb_dipole_speed() / 1000.0
+    );
+    println!(
+        "  ratio to light speed   {:>12.3e}",
+        cmb_dipole_speed() / C
     );
 }

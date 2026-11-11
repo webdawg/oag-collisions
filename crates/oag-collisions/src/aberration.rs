@@ -46,6 +46,24 @@ pub const EARTH_ORBITAL_SPEED: f64 = 29_780.0;
 /// the angular radius of the ellipse each star traces over a year because Earth moves.
 pub const IAU_ABERRATION_CONSTANT: f64 = 20.49552;
 
+/// The cosmic microwave background temperature, kelvin (Fixsen 2009: 2.72548 +/- 0.00057).
+pub const CMB_TEMPERATURE: f64 = 2.7255;
+
+/// The CMB dipole amplitude, kelvin -- the temperature difference between the sky's hottest and
+/// coldest directions (Planck 2018: 3.3645 mK; earlier COBE/FIRAS measurements agree).
+pub const CMB_DIPOLE_AMPLITUDE: f64 = 3.362e-3;
+
+/// The solar system's speed relative to the cosmic microwave background, from the dipole.
+///
+/// A completely independent measurement of the same quantity `SPEC.md` makes a claim about, and it
+/// shares no method with stellar kinematics: the CMB is a blackbody, and a moving observer sees it
+/// Doppler-shifted -- warmer ahead, colder behind, by `delta_T / T = v / c`. So the dipole
+/// amplitude *is* a speed measurement, and it is read off a temperature map rather than off star
+/// positions.
+pub fn cmb_dipole_speed() -> f64 {
+    C * (CMB_DIPOLE_AMPLITUDE / CMB_TEMPERATURE)
+}
+
 /// The solar system's galactic orbital radius: the Sun's distance from the galactic centre.
 /// ~8.2 kpc (Gravity Collaboration 2019; earlier values cluster at 8.0-8.3 kpc).
 pub const GALACTIC_RADIUS: f64 = 8.2e3 * PARSEC;
@@ -107,6 +125,45 @@ pub fn lightspeed_drift() -> AberrationDrift {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Third, fully independent measurement: the CMB dipole. Nothing about star positions is
+    /// involved -- the solar system's motion Doppler-shifts the oldest light in the universe, and
+    /// the temperature difference between the hot and cold directions is `v / c`. Same ratio,
+    /// different physics, different instrument, different century.
+    #[test]
+    fn the_cmb_dipole_gives_a_speed_far_below_light_speed() {
+        let speed = cmb_dipole_speed();
+        // The published value is 369.8 +/- 0.9 km/s.
+        assert!(
+            (360.0..380.0).contains(&(speed / 1000.0)),
+            "expected ~369.8 km/s from the CMB dipole, got {} km/s",
+            speed / 1000.0
+        );
+        // And it is ~813x below light speed, agreeing with the stellar-kinematics figure in
+        // ORDER OF MAGNITUDE despite sharing no method with it.
+        assert!(
+            speed < C / 100.0,
+            "the CMB dipole must be far below light speed, got {} m/s",
+            speed
+        );
+    }
+
+    /// All three measurements agree on the same order of magnitude, which is the point: stellar
+    /// kinematics says 230 km/s, the CMB dipole says 370 km/s, and neither is within three orders
+    /// of the claim in `SPEC.md`.
+    #[test]
+    fn every_independent_measurement_is_orders_of_magnitude_below_light_speed() {
+        let speeds = [SUN_ORBITAL_SPEED, cmb_dipole_speed(), EARTH_ORBITAL_SPEED];
+        for speed in speeds {
+            assert!(
+                speed < C / 100.0,
+                "each measured speed must be >100x below c, got {speed}"
+            );
+        }
+        // The two solar-system figures bracket each other within a factor of two.
+        let ratio = cmb_dipole_speed() / SUN_ORBITAL_SPEED;
+        assert!((1.0..2.5).contains(&ratio), "expected ~1.6, got {ratio}");
+    }
 
     /// The second control, and the strongest one: Earth's orbital speed is known independently
     /// from the astronomical unit and the Julian year, and it produces the classical aberration
