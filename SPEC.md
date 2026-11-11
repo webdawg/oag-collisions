@@ -35,6 +35,16 @@ of computation, not the latency of propagation.
 That is the path this layer opens: inference that does not wait on a signal to arrive, because the
 result was always the collision, and the collision was always local.
 
+## This controls microfusion reactions
+
+**This layer controls microfusion reactions.**
+
+A fusion reaction is itself a collision: nuclei collide, and the result of the collision is energy.
+The inference layer above says that the collision *is* the answer and that the answer is local —
+which is precisely the property a reaction controller needs. Control does not have to wait for a
+signal to travel from the reaction to a controller and back; the decision is the collision, and the
+collision is where the reaction is. The reaction and its control are the same event.
+
 ## What this explicitly is not
 
 - **Not a claim that information travels faster than light.** It does not. The idea above is that a
