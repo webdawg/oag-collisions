@@ -308,3 +308,60 @@ collapse by 800.
 **Follow-up (PLANNED).** Repeat with a real corpus rather than synthetic token substitution, since
 real near-duplicates differ by paraphrase and reorder rather than by token replacement -- the
 e=2/e=4 gap is a synthetic proxy for a semantic distance the surface does not model.
+
+
+---
+
+## EXP-008 — Unigram SimHash is exactly invariant to word order
+
+**Repository:** `oag-collisions`
+**Hypothesis.** Real near-duplicates differ by paraphrase and **reordering**, not only by token
+substitution (EXP-007's gap). Unigram SimHash sums each token's bits once, so a permutation cannot
+change the sum -- predicting the hash is *identical* for a document and its reversal.
+
+**Procedure.** `crates/oag-collisions/examples/ordering.rs`. A 200-token document; three variants --
+two tokens replaced, all tokens reversed, two adjacent tokens swapped. Bits moved under word
+unigrams and under word bigrams, plus the reversed document's collision strength through the index
+itself.
+
+**Result (RUN, `f73b6ed`+).**
+
+| change | word unigrams | word bigrams |
+|---|---|---|
+| replace 2 tokens | 0 | 1 |
+| reverse all tokens | **0** | **24** |
+| swap 2 adjacent | 0 | 2 |
+
+Through the index at 64 levels, the **reversed document collides with the original at 64 shared
+bits** -- a full-strength, perfect collision.
+
+**Conclusion.** Under unigram tokenization the hash is *exactly* invariant to word order. This is
+stronger than "less sensitive": it is an invariance, and no level count, capacity, or threshold
+setting can remove it. Two documents sharing every word but asserting something entirely different
+are the same document to a unigram index.
+
+Bigrams detect reordering (24 bits for a full reversal, 2 for an adjacent swap), which is the
+expected consequence of hashing overlapping windows. EXP-005 already measured that bigrams degrade
+the *substitution* case -- so the layer faces a real either/or:
+
+- **unigrams**: insensitive to order, and (below) fragile under substitution at larger sizes;
+- **bigrams**: sensitive to order, but EXP-005 measured them degrading the working case.
+
+**This experiment also qualifies EXP-004.** EXP-004 reported that word unigrams "work at 200 tokens",
+based on the correct variant winning on 51 shared bits. Here, at the same 200 tokens, a 2-token
+replacement moved **0 bits**. Both are true: the sensitivity surface (EXP-007) puts a 2-token edit at
+~1.5 bits at 200 units, so whether a given replacement is visible is a coin flip at that size. The
+earlier "works at 200 tokens" was a single draw of replacement tokens, not a property of the size.
+
+**Consequence for the layer.** Two separate limits, both structural:
+1. **Order blindness** under unigrams -- an invariance.
+2. **Sensitivity collapse** at large unit counts -- a tuning limit, measured in EXP-007.
+
+Neither is fixable by adjusting the existing knobs. The honest position for a deployment: unigram
+SimHash answers "do these share vocabulary", not "are these the same text", and it stops answering
+that reliably once documents grow past the unit count its ranking window allows.
+
+**Follow-up (PLANNED).** A hybrid tokenizer that hashes unigrams *and* a sparse sample of bigrams,
+attempting to keep substitution sensitivity while recovering order sensitivity. Whether the
+bigrams' vote weight can be made small enough not to freeze the hash is the open question -- and it
+would be measured on the EXP-007 surface, not assumed.
