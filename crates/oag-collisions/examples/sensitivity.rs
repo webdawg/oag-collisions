@@ -8,7 +8,7 @@
 //!
 //! Run with `cargo run -p oag-collisions --example sensitivity`.
 
-use oag_collisions::simhash;
+use oag_collisions::{simhash, simhash_weighted, CollisionIndex, Tokenizer, HASH_BITS};
 
 /// A deterministic generator, so the surface is identical on every run.
 struct Lcg(u64);
@@ -37,7 +37,109 @@ fn bits_moved(units: usize, edits: usize, seed: u64) -> u32 {
     (simhash(&base_refs) ^ simhash(&changed_refs)).count_ones()
 }
 
+/// Measures the bigram-vote trade-off directly: order sensitivity against substitution
+/// sensitivity, for each integer `bigram_weight`.
+///
+/// The weight is an `i32` and unigrams are fixed at 1, so the smallest non-zero bigram
+/// contribution is a *full* vote -- there is no fractional setting through the tokenizer. That
+/// makes the knob coarse, and this measures how coarse.
 fn main() {
+    println!("bigram vote weight: order sensitivity against substitution sensitivity");
+    println!("========================================================================");
+    println!("{:>8} {:>16} {:>18} {:>16}", "weight", "reversal bits", "substitute 2 bits", "units");
+    for weight in [0_i32, 1, 2, 4] {
+        let tokenizer = Tokenizer::Words { shingle: 2, bigram_weight: weight };
+        let units = tokenizer.tokenize(&document(200).join(" ")).len();
+
+        let base = document(200);
+        let mut reversed = base.clone();
+        reversed.reverse();
+        let base_units = tokenizer.tokenize(&base.join(" "));
+        let rev_units = tokenizer.tokenize(&reversed.join(" "));
+        let order_bits = {
+            let base_refs: Vec<(&str, i32)> =
+                base_units.iter().map(|(unit, w)| (unit.as_str(), *w)).collect();
+            let rev_refs: Vec<(&str, i32)> =
+                rev_units.iter().map(|(unit, w)| (unit.as_str(), *w)).collect();
+            (simhash_weighted(&base_refs) ^ simhash_weighted(&rev_refs)).count_ones()
+        };
+
+        // Substitution sensitivity at the same size, averaged over seeds.
+        let mut sub_total = 0u64;
+        let seeds = 8u64;
+        for seed in 0..seeds {
+            let mut changed = base.clone();
+            let mut rng = Lcg(0x5EED + seed * 7919);
+            for slot in changed.iter_mut().take(2) {
+                *slot = format!("x{}", rng.next() % 1_000_000);
+            }
+            let sub_units = tokenizer.tokenize(&changed.join(" "));
+            let base_refs: Vec<(&str, i32)> =
+                base_units.iter().map(|(unit, w)| (unit.as_str(), *w)).collect();
+            let sub_refs: Vec<(&str, i32)> =
+                sub_units.iter().map(|(unit, w)| (unit.as_str(), *w)).collect();
+            sub_total += (simhash_weighted(&base_refs) ^ simhash_weighted(&sub_refs))
+                .count_ones() as u64;
+        }
+        println!(
+            "{:>8} {:>16} {:>18.1} {:>16}",
+            weight,
+            order_bits,
+            sub_total as f64 / seeds as f64,
+            units
+        );
+    }
+    println!();
+    println!("weight 0 is plain unigrams: order-insensitive by invariance, substitution ~1.5 bits.");
+    println!("The question is whether any non-zero weight keeps substitution above zero while");
+    println!("making order visible -- and the unit count shows why that is hard: every bigram adds");
+    println!("a unit, and units are what freeze the vote.");
+
+    // Does the improved substitution sensitivity actually fix the *ranking*? Bits moved is not
+    // the same as rank-1 correct, and EXP-005's ranking result was measured at weight 1 -- the
+    // one setting that makes both worse.
+    println!();
+    println!("does a higher bigram weight fix the ranking?");
+    println!("============================================");
+    println!("{:>8} {:>16} {:>16} {:>14}", "weight", "top-1 at 200", "top-1 at 60", "top-1 at 8");
+    for weight in [0_i32, 1, 2, 4, 8] {
+        let row = [200_usize, 60, 8].map(|units| {
+            let mut index = CollisionIndex::with_tokenizer(
+                10_000,
+                HASH_BITS,
+                Tokenizer::Words { shingle: 2, bigram_weight: weight },
+            );
+            let variants = 60.min(units / 4 + 1);
+            let base: Vec<String> = (0..units).map(|i| format!("w{i}")).collect();
+            let mut rng = Lcg(0x5EED);
+            for v in 1..variants {
+                let mut variant = base.clone();
+                for slot in variant.iter_mut().take(v * 2) {
+                    *slot = format!("x{}", rng.next() % 1_000_000);
+                }
+                index.insert_text(&format!("variant-{v}"), &variant.join(" "));
+            }
+            let results = index.collide_text(&base.join(" "));
+            let rank = results
+                .iter()
+                .position(|c| c.id == "variant-1")
+                .map(|p| p + 1);
+            match rank {
+                Some(1) => "yes".to_string(),
+                Some(r) => format!("no (#{r})"),
+                None => "absent".to_string(),
+            }
+        });
+        println!("{:>8} {:>16} {:>16} {:>14}", weight, row[0], row[1], row[2]);
+    }
+    println!();
+    println!("weight 0 is plain unigrams. Weight 1 was EXP-005's setting and the only one that makes");
+    println!("both sensitivities worse; the question is whether a heavier bigram vote recovers the");
+    println!("ranking that weight 1 loses.");
+
+    println!();
+    println!("SimHash sensitivity surface: bits moved by an edit");
+    println!("==================================================");
     let unit_counts = [10_usize, 20, 50, 100, 200, 400, 800];
     let edit_distances = [1_usize, 2, 4, 8, 16, 32, 64];
 

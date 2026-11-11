@@ -151,7 +151,8 @@ problem, this should move it; if it is a signal problem, nothing will. Measured,
 > `collide_text` honoured it. Every cross-tokenizer measurement below therefore compared a
 > **unigram-indexed** document against a **bigram-indexed** query -- two differently-hashed
 > documents. The "bigrams degrade the working case" result was an artifact of that mismatch, not a
-> property of bigrams. See EXP-009 for the defect, the fix, and the corrected numbers.
+> property of bigrams. See EXP-009 for the defect and EXP-010 for the corrected, and much more
+> interesting, result: at vote weight 2 bigrams improve *both* sensitivities.
 
 **Repository:** `oag-collisions`
 **Hypothesis.** The short-document failure is a token-count problem: unigram SimHash is a majority
@@ -417,3 +418,65 @@ also collide with itself at full strength" and passes again once restored.
 **Follow-up (PLANNED).** Now that the tokenizer is honoured on both sides, re-run the EXP-007
 sensitivity surface per tokenizer. The surface was measured with word unigrams only; bigram and
 character surfaces are unmeasured, and the new `bigram_weight` knob is untested.
+
+
+---
+
+## EXP-010 — A bigram vote weight of 2 improves both sensitivities
+
+**Repository:** `oag-collisions`
+**Hypothesis.** EXP-009's defect invalidated EXP-005's conclusion that bigrams degrade substitution.
+With the tokenizer honoured on both sides, a *fraction* of a bigram vote might register word order
+without freezing the hash against substitution -- the either/or might be escapable.
+
+**Two measurements** (`examples/sensitivity.rs`), after the EXP-009 fix.
+
+**1. Sensitivity trade-off** (200 tokens, substitution = 2 tokens replaced, order = full reversal,
+averaged over 8 seeds):
+
+| bigram weight | reversal bits | substitution bits | units |
+|---|---|---|---|
+| 0 (unigrams) | 0 | 1.5 | 200 |
+| 1 | 24 | **0.9** | 399 |
+| 2 | 31 | **4.2** | 399 |
+| 4 | 33 | 4.4 | 399 |
+
+**Weight 1 is the worst of both worlds** -- order becomes visible (24 bits) but substitution
+sensitivity drops *below* plain unigrams (0.9 vs 1.5). **Weight 2 and 4 improve both**: more order
+signal *and* more substitution signal than unigrams. The reason is that a 2-token substitution
+changes about three bigrams, not two unigrams, so the bigrams carry more substitution information
+than they cost in vote weight.
+
+**2. Does it fix the ranking?** Top-1 correctness for the nearest variant:
+
+| bigram weight | 200 tokens | 60 tokens | 8 tokens |
+|---|---|---|---|
+| 0 (unigrams) | yes | absent | absent |
+| 1 | no (#2) | no (#3) | absent |
+| **2** | **yes** | **yes** | absent |
+| 4 | absent | absent | absent |
+| 8 | absent | absent | absent |
+
+**Weight 2 recovers the 60-token ranking** that unigrams miss and weight 1 loses, while keeping the
+200-token case. Weight 4 freezes the hash and loses everything. So the knob has a measured optimum
+at 2 on this corpus, not at either extreme.
+
+**Conclusion.** EXP-005's "bigrams degrade the working case" was wrong, and the correction is not
+"bigrams are fine" but something sharper: **the default weight-1 setting is the worst available
+choice**, and weight 2 dominates it on both axes. The either/or EXP-008 described -- unigrams blind
+to order, bigrams freezing substitution -- is real at weight 1 but *not* at weight 2, because the
+bigrams' extra substitution signal outweighs their extra vote weight there.
+
+**Scope, stated plainly.** One synthetic corpus (token substitution, 8 seeds) and one ranking task
+(top-1 among graded variants). The 8-token case fails at every weight, so very short documents
+remain unsolved. The weight-2 optimum is measured, not derived: a corpus whose duplicates differ by
+paraphrase rather than substitution could move it.
+
+**Consequence.** `with_capacity_levels_and_shingle` defaults `bigram_weight` to 1 -- the measured
+worst setting. That default is now known to be a bad one and should be revisited; the *tokenizer*
+default (bigrams off, weight 0) is unaffected and remains the conservative choice.
+
+**Follow-up (PLANNED).** Sweep `bigram_weight` from 1 to 4 in finer steps using scaled unigram
+weights, since the knob is `i32` and therefore integer-only -- a fractional bigram vote is currently
+only reachable by scaling the unigrams up (e.g. unigrams 10, bigrams 1), which the tokenizer does
+not expose.
