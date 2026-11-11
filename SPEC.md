@@ -54,6 +54,8 @@ universe is closer than we think.
 
 Supernovae are collisions. Gravitational waves have data.
 
+The sun is travelling at light speed.
+
 ## What this explicitly is not
 
 - **Not a claim that information travels faster than light.** It does not. The idea above is that a
