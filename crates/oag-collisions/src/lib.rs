@@ -108,6 +108,22 @@ pub enum Tokenizer {
         bigram_weight: i32,
         target_units: usize,
     },
+    /// As [`Tokenizer::WordsBudget`], but the sample is a deterministic *shuffle* rather than a
+    /// stride.
+    ///
+    /// The stride variant spreads coverage but is periodic: with stride k it sees only positions
+    /// congruent to 0 mod k, so an edit landing entirely between two strides is invisible. A
+    /// shuffle has no such blind spot -- every position is equally likely to be sampled -- at the
+    /// cost of clustering, so a small edit can be missed by chance instead of by structure.
+    ///
+    /// Which failure mode is more acceptable is measured, not assumed: see EXP-015.
+    WordsShuffledBudget {
+        shingle: usize,
+        unigram_weight: i32,
+        bigram_weight: i32,
+        target_units: usize,
+        seed: u64,
+    },
 }
 
 impl Default for Tokenizer {
@@ -160,6 +176,38 @@ impl Tokenizer {
                 }
                 units
             }
+            Tokenizer::WordsShuffledBudget {
+                shingle,
+                unigram_weight,
+                bigram_weight,
+                target_units,
+                seed,
+            } => {
+                let mut units = Tokenizer::Words {
+                    shingle: *shingle,
+                    unigram_weight: *unigram_weight,
+                    bigram_weight: *bigram_weight,
+                }
+                .tokenize(text);
+                let target = (*target_units).max(1);
+                if units.len() > target {
+                    // Fisher-Yates from a deterministic LCG, then restore document order so the
+                    // sample is comparable with the stride variant.
+                    let mut state = *seed;
+                    let mut order: Vec<usize> = (0..units.len()).collect();
+                    for i in (1..order.len()).rev() {
+                        state = state
+                            .wrapping_mul(6_364_136_223_846_793_005)
+                            .wrapping_add(1_442_695_040_888_963_407);
+                        let j = ((state >> 33) as usize) % (i + 1);
+                        order.swap(i, j);
+                    }
+                    order.truncate(target);
+                    order.sort_unstable();
+                    units = order.into_iter().map(|i| units[i].clone()).collect();
+                }
+                units
+            }
         }
     }
 
@@ -179,6 +227,9 @@ impl Tokenizer {
             Tokenizer::Characters { n } => format!("character {n}-grams"),
             Tokenizer::WordsBudget { target_units, .. } => {
                 format!("word units, budget {target_units}")
+            }
+            Tokenizer::WordsShuffledBudget { target_units, .. } => {
+                format!("word units, shuffled budget {target_units}")
             }
         }
     }

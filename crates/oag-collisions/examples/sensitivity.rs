@@ -318,6 +318,110 @@ fn main() {
     println!("truncating it. The floor is set by the budget itself -- a budget of 20 cannot resolve a");
     println!("2-token edit any better than a 20-token document can.");
 
+    // EXP-015: the stride's periodic blind spot. With an 800-token document and a budget of 50 the
+    // stride is 16, so it samples positions 0, 16, 32, ... An edit placed entirely between two
+    // strides -- here positions 8 and 9 -- is structurally invisible. A shuffle has no such blind
+    // spot: every position is equally likely to be sampled.
+    println!();
+    println!("stride versus shuffle: the periodic blind spot");
+    println!("==============================================");
+    let tokens = 800;
+    // A budget of 50 over 800 tokens is 6% coverage, at which a 2-token edit is missed by
+    // *both* schemes most of the time -- the shuffle looks blind when it is merely sparse.
+    // 200 is 25%, where a 2-token edit is usually visible, so the two schemes can be compared.
+    let budget = 200;
+    let stride = (tokens + budget - 1) / budget;
+    println!("document {tokens} tokens, budget {budget} -> stride {stride}");
+    println!();
+    println!(
+        "{:>12} {:>16} {:>16}",
+        "edit at", "stride bits", "shuffle bits"
+    );
+    // Sweep the edit position across the first few strides. Positions that are multiples of the
+    // stride are sampled; positions between them are not.
+    // Averaged over 8 seeds: the stride's blindness is structural, so its mean is a step
+    // function; the shuffle's is chance, so its mean is smooth. A single seed cannot show
+    // that difference -- the shuffle would look blind too.
+    // Positions relative to the stride: on a stride boundary (sampled), halfway between
+    // (not sampled), on the next boundary, and halfway after that.
+    for offset in [0_usize, stride / 2, stride, stride + stride / 2] {
+        let measure = |tokenizer: &dyn Fn(&str, u64) -> Vec<(String, i32)>, seed: u64| -> f64 {
+            let base_text = document(tokens).join(" ");
+            let mut changed = document(tokens);
+            changed[offset] = "x111111".into();
+            changed[offset + 1] = "x222222".into();
+            let changed_text = changed.join(" ");
+            // The same seed must be used for the base and the changed document -- the sample
+            // has to be the same for the comparison to mean anything -- but it must vary
+            // between iterations, or eight "corpora" are one sample counted eight times.
+            let base_units = tokenizer(&base_text, seed);
+            let base_refs: Vec<(&str, i32)> =
+                base_units.iter().map(|(unit, w)| (unit.as_str(), *w)).collect();
+            let units = tokenizer(&changed_text, seed);
+            let refs: Vec<(&str, i32)> =
+                units.iter().map(|(unit, w)| (unit.as_str(), *w)).collect();
+            (simhash_weighted(&base_refs) ^ simhash_weighted(&refs)).count_ones() as f64
+        };
+        let stride_fn = |text: &str, _seed: u64| {
+            Tokenizer::WordsBudget {
+                shingle: 1,
+                unigram_weight: 1,
+                bigram_weight: 0,
+                target_units: budget,
+            }
+            .tokenize(text)
+        };
+        let shuffle_fn = |text: &str, seed: u64| {
+            Tokenizer::WordsShuffledBudget {
+                shingle: 1,
+                unigram_weight: 1,
+                bigram_weight: 0,
+                target_units: budget,
+                seed,
+            }
+            .tokenize(text)
+        };
+        // Average each scheme over eight distinct seeds.
+        let average = |f: &dyn Fn(&str, u64) -> Vec<(String, i32)>| -> f64 {
+            (0..8_u64).map(|s| measure(f, 0x5EED + s * 7919)).sum::<f64>() / 8.0
+        };
+        println!(
+            "{:>12} {:>16.1} {:>16.1}",
+            format!("{}-{}", offset, offset + 1),
+            average(&stride_fn),
+            average(&shuffle_fn)
+        );
+    }
+    // Diagnostic: which indices does the stride actually sample?
+    {
+        let base_units = Tokenizer::Words { shingle: 1, unigram_weight: 1, bigram_weight: 0 }
+            .tokenize(&document(800).join(" "));
+        let sampled: Vec<usize> = {
+            let stride = (base_units.len() + budget - 1) / budget;
+            (0..base_units.len()).step_by(stride).take(budget).collect()
+        };
+        println!();
+        println!("diagnostic: stride {stride} over {} units samples indices {:?} ...", base_units.len(), &sampled[..8.min(sampled.len())]);
+        println!(
+            "  is the first between-stride position sampled? {}",
+            sampled.contains(&(stride / 2))
+        );
+        println!(
+            "  is the second between-stride position sampled? {}",
+            sampled.contains(&(stride / 2 + 1))
+        );
+    }
+    println!();
+    println!("read this as: the stride moves the hash for edits that land on a stride boundary and");
+    println!("not for edits between them -- a step function, structural rather than chance. The shuffle");
+    println!("has no blind spot: its mean is smooth and positive everywhere, and its variance is the");
+    println!("price. Note the stride also *always* samples index 0, which is a bias in its favour that");
+    println!("is not coverage -- a document's opening is over-weighted by construction.");
+    println!();
+    println!("Which is worse depends on whether the edits you care about are periodic. For a crawler");
+    println!("comparing a page against its previous fetch, edits are arbitrary, so the shuffle's");
+    println!("variance is the better failure mode -- it fails randomly rather than systematically.");
+
     println!();
     println!("read this as the EXP-007 surface with the rows for 100+ tokens collapsed onto the 50-token");
     println!("row. If they are not, the unit-count story is wrong and the surface is measuring something");

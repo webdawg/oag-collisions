@@ -705,3 +705,56 @@ and against hashing a fixed number of *windows* rather than individual tokens. S
 deterministic and spreads coverage, but it is also periodic -- a document whose edits fall between
 strides is invisible, and a random sample would not have that blind spot at the cost of clustering.
 Which failure mode is more acceptable is unmeasured.
+
+
+---
+
+## EXP-015 — Stride versus shuffle sampling at the same budget
+
+**Repository:** `oag-collisions`
+**Hypothesis.** EXP-014's stride sampling flattens the sensitivity surface but is periodic: with
+stride k it sees only positions congruent to 0 mod k, so an edit landing entirely between two
+strides is structurally invisible. A deterministic *shuffle* has no blind spot -- every position is
+equally likely to be sampled -- at the cost of clustering, so a small edit can be missed by chance
+instead of by structure. Which failure mode is better is measurable.
+
+**Procedure.** New `Tokenizer::WordsShuffledBudget`: Fisher-Yates from a deterministic LCG over the
+unit indices, then restore document order, so the sample is comparable with the stride variant.
+Both schemes given the same budget (200 units of an 800-token document, stride 4). Edits placed
+relative to the stride: on a boundary (sampled), halfway between (not sampled), on the next
+boundary, halfway after. Each averaged over 8 distinct seeds.
+
+**Result (RUN, `40f588c`+).**
+
+| edit at | stride bits | shuffle bits |
+|---|---|---|
+| 0-1 (on stride) | 1.0 | 0.9 |
+| 2-3 (between) | **0.0** | 0.9 |
+| 4-5 (on stride) | 1.0 | 0.6 |
+| 6-7 (between) | **0.0** | 1.5 |
+
+**Conclusion.** The stride is a **step function**: it moves the hash for edits that land on a
+stride boundary and not at all for edits between them. That is structural, not chance -- no amount
+of averaging removes it, because the mean over seeds is the same step function. The shuffle has no
+blind spot: its mean is positive and smooth at every position, and its variance is the price.
+
+**A bias in the stride's favour, found while measuring.** The stride always samples index 0, so a
+document's opening is over-weighted by construction. That is not coverage; it is a systematic bias
+toward the beginning of every document. Part of the stride's apparently better behaviour at
+position 0-1 comes from that.
+
+**Which failure mode is more acceptable.** For a crawler comparing a page against its previous
+fetch, edits are arbitrary rather than periodic, so the shuffle's random failure is the better one:
+it fails sometimes and unpredictably, whereas the stride fails always and predictably for a whole
+class of positions. For a task where edits are known to be aligned -- comparing fixed-width records
+at fixed offsets -- the stride's blind spot coincides with positions that cannot change anyway, and
+it is the better choice. Neither is universally right, and the choice should follow the edit model.
+
+**Honest limits.** One document size (800 tokens), one budget (25% coverage), word unigrams only.
+The shuffle's per-seed variance is not reported here -- only its mean -- so "the shuffle is noisier"
+is inferred from the spread across positions rather than measured directly.
+
+**Follow-up (PLANNED).** The third option the EXP-014 record named: hash a fixed number of
+*windows* rather than individual tokens. A window spans several tokens, so a small edit changes
+every window that overlaps it -- that is neither a periodic blind spot nor a clustering coin flip,
+and it may dominate both. Unmeasured.
