@@ -442,7 +442,7 @@ fn main() {
     let tokens = 800;
     let budget = 200;
     let seeds = 8_u64;
-    let flat = |n: usize| -> Vec<String> { (0..n).map(|i| format!("w{i}")).collect() };
+    let flat_doc = |n: usize| -> Vec<String> { (0..n).map(|i| format!("w{i}")).collect() };
     let schemes: [(&str, Tokenizer, Tokenizer, Tokenizer); 1] = [("", Tokenizer::WordsBudget { shingle: 1, unigram_weight: 1, bigram_weight: 0, target_units: budget }, Tokenizer::WordsShuffledBudget { shingle: 1, unigram_weight: 1, bigram_weight: 0, target_units: budget, seed: 0 }, Tokenizer::WordsWindowBudget { window: 3, target_units: budget })];
     let _ = schemes;
     let stride = Tokenizer::WordsBudget { shingle: 1, unigram_weight: 1, bigram_weight: 0, target_units: budget };
@@ -451,7 +451,7 @@ fn main() {
 
     // Shuffle needs a seed per (position, seed) pair to be a fair sample, so it is rebuilt
     // inside the loop; the other two are position-independent and built once.
-    let base_text = flat(tokens).join(" ");
+    let base_text = flat_doc(tokens).join(" ");
     let stride_base = stride.tokenize(&base_text);
     let stride_base_refs: Vec<(&str, i32)> =
         stride_base.iter().map(|(u, w)| (u.as_str(), *w)).collect();
@@ -464,7 +464,7 @@ fn main() {
     let mut trials = 0_usize;
     for offset in &sample_positions {
         for seed in 0..seeds {
-            let mut changed = flat(tokens);
+            let mut changed = flat_doc(tokens);
             let mut rng = Lcg(0x5EED + seed * 7919);
             changed[*offset] = format!("x{}", rng.next() % 1_000_000);
             changed[*offset + 1] = format!("x{}", rng.next() % 1_000_000);
@@ -507,6 +507,52 @@ fn main() {
             hits,
             trials - hits,
             100.0 * hits as f64 / trials as f64
+        );
+    }
+    println!();
+    println!("window width at a fixed budget of {budget}");
+    println!("==========================================");
+    println!("the coverage argument predicts the rate tracks window*budget/tokens: width 2 covers");
+    println!("50% of positions, 3 covers 75%, 5 and 8 saturate. Measure it rather than assume.");
+    println!();
+    println!("{:>8} {:>14} {:>12} {:>10}", "window", "detected", "missed", "rate");
+    for window in [2_usize, 3, 5, 8] {
+        let mut detected = 0_usize;
+        let mut trials = 0_usize;
+        for offset in (0..tokens - 2).step_by(2) {
+            for seed in 0..seeds {
+                let base_text = flat_doc(tokens).join(" ");
+                let mut changed = flat_doc(tokens);
+                let mut rng = Lcg(0x5EED + seed * 7919);
+                changed[offset] = format!("x{}", rng.next() % 1_000_000);
+                changed[offset + 1] = format!("x{}", rng.next() % 1_000_000);
+                let changed_text = changed.join(" ");
+                let base_units = Tokenizer::WordsWindowBudget {
+                    window,
+                    target_units: budget,
+                }
+                .tokenize(&base_text);
+                let base_refs: Vec<(&str, i32)> =
+                    base_units.iter().map(|(u, w)| (u.as_str(), *w)).collect();
+                let units = Tokenizer::WordsWindowBudget {
+                    window,
+                    target_units: budget,
+                }
+                .tokenize(&changed_text);
+                let refs: Vec<(&str, i32)> =
+                    units.iter().map(|(u, w)| (u.as_str(), *w)).collect();
+                if (simhash_weighted(&base_refs) ^ simhash_weighted(&refs)).count_ones() > 0 {
+                    detected += 1;
+                }
+                trials += 1;
+            }
+        }
+        println!(
+            "{:>8} {:>14} {:>12} {:>9.1}%",
+            window,
+            detected,
+            trials - detected,
+            100.0 * detected as f64 / trials as f64
         );
     }
     println!();

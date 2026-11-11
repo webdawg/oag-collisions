@@ -861,3 +861,50 @@ fixed budget. The prediction from the coverage argument: the rate should scale w
 token positions covered, so window 5 should approach 100% and window 2 should fall toward the
 shuffle's. If it does, coverage is confirmed as the mechanism; if not, something else is driving
 the window scheme's advantage.
+
+---
+
+## EXP-018 — Window width: coverage is necessary but not sufficient
+
+**Repository:** `oag-collisions`
+**Hypothesis.** EXP-017 concluded that coverage is the binding quantity and predicted the detection
+rate should track `window * budget / tokens`: width 2 covers 50% of positions, width 3 covers 75%,
+and widths 5 and 8 saturate.
+
+**Procedure.** Same rate measurement as EXP-017 -- every second position of an 800-token document,
+8 seeds, budget fixed at 200 -- with the window width varied over 2, 3, 5 and 8.
+
+**Result (RUN, `b402cdd`+).**
+
+| window | detected | missed | rate | coverage prediction |
+|---|---|---|---|---|
+| 2 | 1300 | 1892 | 40.7% | 50% |
+| 3 | 2762 | 430 | 86.5% | 75% |
+| 5 | 3102 | 90 | 97.2% | 100% |
+| 8 | 3045 | 147 | 95.4% | 100% |
+
+**The trend confirms coverage; the absolutes do not.** Width 2 lands at 40.7% against a predicted
+50%, width 3 at 86.5% against 75%, and both saturate around 95-97% rather than 100%.
+
+**Why the absolutes miss -- the vote absorbs a changed unit.** A 2-token edit changes 3 windows out
+of 799 under width 2, or 4 out of 797 under width 3. With a budget of 200, the expected number of
+changed sampled units is under one. A single changed unit out of 200 almost never flips a bit -- the
+majority vote absorbs it unless that bit's vote was within one of a tie. So the rate is roughly
+`coverage x (1 - absorption)`, and the absorption floor is the ~3.5% residual seen at saturation.
+
+**Conclusion.** Coverage is necessary but not sufficient. The decisive quantity is the **fraction
+of sampled units that changed** -- `edit_span / document_length` scaled by how many units the edit
+touches -- not the fraction of positions covered. Widening the window raises both coverage and the
+number of units an edit touches, which is why the rate rises, but the vote's absorption sets a floor
+that coverage alone cannot predict. The usable predictor for a deployment: an edit is detectable when
+it changes a substantial fraction of the *sampled* units, not merely when it lands inside a sampled
+window.
+
+**Honest limits.** One document size (800 tokens), one budget (25%), word unigrams, and a 2-token
+edit. The absorption floor was inferred from the saturation residual rather than measured directly --
+a direct test would fix the edit size and vary the budget until the floor moves, which is unmeasured.
+
+**Follow-up (PLANNED).** Measure the absorption floor directly: for a fixed edit, sweep the budget
+from 1 to 400 and find where the detection rate stops rising. The prediction is that the floor falls
+as the budget grows, because a changed unit becomes a larger fraction of a smaller sample. If it does
+not, absorption is not the mechanism and the coverage story is incomplete.
