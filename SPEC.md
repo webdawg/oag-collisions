@@ -56,6 +56,14 @@ Supernovae are collisions. Gravitational waves have data.
 
 The sun is travelling at light speed.
 
+**Tested -- see `EXPERIMENTS.md` EXP-001.** Taken literally and checked against the secular
+aberration drift (VLBI/Gaia, ~5 microarcseconds/year): a solar system moving at `c` around the
+galaxy would slide the whole sky by **7.7 arcseconds per year**, about 0.17 degrees across one
+human lifetime and 1.7 million times what is measured. The statement is not consistent with
+observation; the discrepancy is a factor of ~1300 in velocity. Recorded here as the operator's
+statement, with the measurement beside it, because a claim that survives being taken literally is
+worth more than one that is never tested.
+
 ## What this explicitly is not
 
 - **Not a claim that information travels faster than light.** It does not. The idea above is that a

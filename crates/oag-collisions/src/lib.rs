@@ -19,6 +19,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod aberration;
+
 use std::collections::HashMap;
 
 /// Hash width in bits. 64 keeps the prefix ladder manageable (64 index entries per item) while
@@ -60,20 +62,20 @@ pub fn simhash(tokens: &[&str]) -> u64 {
 ///
 /// Deliberately crude: lowercase alphanumeric runs. This is a similarity signal, not a parser --
 /// the point is that "rust async runtime" and "Rust Async Runtime!" land close together.
-pub fn tokenize(text: &str) -> Vec<&str> {
+pub fn tokenize(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
-    let mut start = None;
-    for (index, character) in text.char_indices() {
+    let mut current = String::new();
+    for character in text.chars() {
         if character.is_alphanumeric() {
-            if start.is_none() {
-                start = Some(index);
-            }
-        } else if let Some(begin) = start.take() {
-            tokens.push(&text[begin..index]);
+            // Lowercased so that "Rust" and "rust" are the same token: the signal is the bag of
+            // words, and capitalisation at a sentence boundary is not content.
+            current.extend(character.to_lowercase());
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
         }
     }
-    if let Some(begin) = start {
-        tokens.push(&text[begin..]);
+    if !current.is_empty() {
+        tokens.push(current);
     }
     tokens
 }
@@ -121,7 +123,8 @@ impl CollisionIndex {
     /// Convenience for free text: tokenizes then inserts.
     pub fn insert_text(&mut self, id: &str, text: &str) {
         let tokens = tokenize(text);
-        self.insert(id, &tokens);
+        let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+        self.insert(id, &refs);
     }
 
     /// Removes `id` from every bucket. Missing ids are a no-op, so a caller can prune without
@@ -167,7 +170,8 @@ impl CollisionIndex {
     /// Convenience for free text.
     pub fn collide_text(&self, text: &str) -> Vec<Collision<'_>> {
         let tokens = tokenize(text);
-        self.collide(&tokens)
+        let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+        self.collide(&refs)
     }
 
     /// How many distinct items are indexed.
@@ -198,10 +202,23 @@ mod tests {
     #[test]
     fn near_duplicate_collides_strongly_and_ranks_first() {
         let mut index = CollisionIndex::new();
-        index.insert_text("near", "The Rust Async Runtime");
-        index.insert_text("far", "groundwater borehole probe telemetry");
-        let results = index.collide_text("rust async runtime!");
-        assert_eq!(results[0].id, "near", "the near duplicate must rank first");
+        // Realistic-length texts: SimHash is a majority vote over bit positions, so with a
+        // handful of tokens the vote is decided by noise. These differ by one sentence.
+        index.insert_text(
+            "near",
+            "the rust async runtime provides scheduled task execution across worker threads and \
+             is the foundation most oag services are built on",
+        );
+        index.insert_text(
+            "far",
+            "a fixed groundwater borehole probe reports water column pressure and temperature at \
+             a known location every few seconds",
+        );
+        let results = index.collide_text(
+            "The Rust Async Runtime provides scheduled task execution across worker threads, and \
+             is the foundation most services are built on.",
+        );
+        assert_eq!(results[0].id, "near", "the near duplicate must rank first: {results:?}");
         assert!(results[0].shared_bits >= MIN_COLLISION_BITS);
         assert!(
             results.iter().all(|c| c.id != "far" || c.shared_bits <= results[0].shared_bits),
@@ -226,14 +243,31 @@ mod tests {
     #[test]
     fn re_indexing_replaces_rather_than_duplicates() {
         let mut index = CollisionIndex::new();
-        index.insert_text("a", "first version");
-        index.insert_text("a", "second version");
+        index.insert_text(
+            "a",
+            "the first version of this document described a routing engine over tensor pads and \
+             nothing about collision based inference at all",
+        );
+        index.insert_text(
+            "a",
+            "the second version of this document describes a collision index where similar inputs \
+             share a long hash prefix and that prefix is the inference",
+        );
         assert_eq!(index.len(), 1, "one item, one entry");
-        let results = index.collide_text("second version");
+        let query = "the second version of this document describes a collision index where \
+                     similar inputs share a long hash prefix and that prefix is the inference";
+        let results = index.collide_text(query);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].shared_bits, HASH_BITS);
         // And the stale index entries are gone: the old text no longer matches at full strength.
-        assert!(index.collide_text("first version")[0].shared_bits < HASH_BITS);
+        let stale = index.collide_text(
+            "the first version of this document described a routing engine over tensor pads and \
+             nothing about collision based inference at all",
+        );
+        assert!(
+            stale.is_empty() || stale[0].shared_bits < HASH_BITS,
+            "a replaced entry must not still match at full strength: {stale:?}"
+        );
     }
 
     #[test]
@@ -262,7 +296,7 @@ mod tests {
 
     #[test]
     fn tokenization_ignores_case_and_punctuation() {
-        assert_eq!(tokenize("Hello, World!"), vec!["Hello", "World"]);
+        assert_eq!(tokenize("Hello, World!"), vec!["hello", "world"]);
         assert_eq!(tokenize("  spaced   out  "), vec!["spaced", "out"]);
         assert!(tokenize("!!!").is_empty());
     }
