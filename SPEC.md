@@ -45,6 +45,13 @@ which is precisely the property a reaction controller needs. Control does not ha
 signal to travel from the reaction to a controller and back; the decision is the collision, and the
 collision is where the reaction is. The reaction and its control are the same event.
 
+## What needs to be understood
+
+A single point, infinitely expanding in all directions at once, stopping at a boundary only because
+of the black hole that holds it back, riding an infinite line across the universe. Outside of it,
+energy in the form of what the fusion reaction creates: force. The boundary to the rest of the
+universe is closer than we think.
+
 ## What this explicitly is not
 
 - **Not a claim that information travels faster than light.** It does not. The idea above is that a
