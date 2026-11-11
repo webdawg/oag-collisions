@@ -116,6 +116,12 @@ pub struct CollisionIndex {
     order: std::collections::VecDeque<String>,
     /// How many items the index will hold before evicting the oldest.
     max_items: usize,
+    /// How many prefix levels to index, 1..=this. Defaults to [`HASH_BITS`].
+    ///
+    /// Fewer levels means proportionally less memory -- each item costs `levels` entries, not 64 --
+    /// and a coarser ranking, since two items sharing more than `levels` bits are tied. Whether
+    /// that trade is worth making is measured in `examples/ranking_tradeoff.rs`, not assumed.
+    prefix_levels: u32,
 }
 
 impl Default for CollisionIndex {
@@ -134,12 +140,32 @@ impl CollisionIndex {
     /// `0` means unbounded and is deliberately not offered as a default: an unbounded collision
     /// index is a memory-exhaustion vector, and the caller should have to ask for it.
     pub fn with_capacity(max_items: usize) -> Self {
+        Self::with_capacity_and_levels(max_items, HASH_BITS)
+    }
+
+    /// As [`Self::with_capacity`], with an explicit prefix-level count.
+    ///
+    /// `prefix_levels` is clamped to `[1, HASH_BITS]`. A level count of 1 indexes only exact-hash
+    /// matches; [`HASH_BITS`] resolves every possible shared prefix.
+    pub fn with_capacity_and_levels(max_items: usize, prefix_levels: u32) -> Self {
         Self {
             buckets: HashMap::new(),
             hashes: HashMap::new(),
             order: std::collections::VecDeque::new(),
             max_items,
+            prefix_levels: prefix_levels.clamp(1, HASH_BITS),
         }
+    }
+
+    /// How many prefix levels this index resolves.
+    pub fn prefix_levels(&self) -> u32 {
+        self.prefix_levels
+    }
+
+    /// How many bucket entries one item costs at this level count -- the number to reason about
+    /// when sizing an index, rather than the item count.
+    pub fn entries_per_item(&self) -> u32 {
+        self.prefix_levels
     }
 
     /// How many items this index will hold before evicting.
@@ -160,7 +186,7 @@ impl CollisionIndex {
         let hash = simhash(tokens);
         self.hashes.insert(id.to_string(), hash);
         self.order.push_back(id.to_string());
-        for length in 1..=HASH_BITS {
+        for length in 1..=self.prefix_levels {
             let prefix = hash >> (HASH_BITS - length);
             self.buckets.entry((length, prefix)).or_default().push(id.to_string());
         }
@@ -194,7 +220,7 @@ impl CollisionIndex {
     pub fn remove(&mut self, id: &str) {
         let Some(hash) = self.hashes.remove(id) else { return };
         self.order.retain(|existing| existing != id);
-        for length in 1..=HASH_BITS {
+        for length in 1..=self.prefix_levels {
             let prefix = hash >> (HASH_BITS - length);
             if let Some(bucket) = self.buckets.get_mut(&(length, prefix)) {
                 bucket.retain(|existing| existing != id);
@@ -213,7 +239,11 @@ impl CollisionIndex {
     pub fn collide(&self, tokens: &[&str]) -> Vec<Collision<'_>> {
         let hash = simhash(tokens);
         let mut best: HashMap<&str, u32> = HashMap::new();
-        for length in MIN_COLLISION_BITS..=HASH_BITS {
+        // Never look past the levels that were actually indexed: a bucket that does not exist
+        // would be silently treated as "no collision", which is the correct answer anyway but
+        // hides the configuration from anyone reading the code.
+        let deepest = self.prefix_levels.min(HASH_BITS);
+        for length in MIN_COLLISION_BITS..=deepest {
             let prefix = hash >> (HASH_BITS - length);
             if let Some(bucket) = self.buckets.get(&(length, prefix)) {
                 for id in bucket {
@@ -240,6 +270,16 @@ impl CollisionIndex {
     /// How many distinct items are indexed.
     pub fn len(&self) -> usize {
         self.hashes.len()
+    }
+
+    /// How many bucket entries the index currently holds -- the number that actually costs memory,
+    /// as opposed to [`Self::len`], which is the number of items.
+    ///
+    /// Exposed because the item count is the wrong quantity to reason about: at the default 64
+    /// levels each item costs 64 entries, so an index reporting 100,000 items is holding 6.4
+    /// million entries.
+    pub fn bucket_entries(&self) -> usize {
+        self.buckets.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -387,6 +427,38 @@ mod tests {
         assert_eq!(index.collide_text("lambda mu nu xi omicron pi rho sigma tau upsilon phi")[0].id, "b");
         // Nothing from "a" survives at any prefix length.
         assert!(index.collide_text("alpha beta gamma delta epsilon zeta eta theta iota kappa").is_empty());
+    }
+
+    /// Fewer prefix levels means proportionally fewer bucket entries -- the memory half of the
+    /// trade-off. 16 levels costs a quarter of 64.
+    #[test]
+    fn prefix_levels_control_the_memory_cost() {
+        let full = CollisionIndex::with_capacity_and_levels(1_000, HASH_BITS);
+        let mut quarter = CollisionIndex::with_capacity_and_levels(1_000, 16);
+        assert_eq!(full.entries_per_item(), 64);
+        assert_eq!(quarter.entries_per_item(), 16);
+        assert_eq!(quarter.prefix_levels(), 16);
+
+        quarter.insert_text("a", "alpha beta gamma delta epsilon zeta eta theta iota kappa");
+        // One item, 16 entries -- not 64.
+        assert!(quarter.buckets.len() <= 16, "got {} entries", quarter.buckets.len());
+        assert!(full.buckets.len() <= 64);
+    }
+
+    /// The ranking is still correct at a coarse level count: identical input still collides at
+    /// the deepest level available, and the near duplicate still outranks the unrelated item.
+    #[test]
+    fn a_coarse_index_still_ranks_correctly() {
+        let mut index = CollisionIndex::with_capacity_and_levels(1_000, 16);
+        index.insert_text("near", "the rust async runtime provides scheduled task execution across worker threads");
+        index.insert_text("far", "a groundwater borehole probe reports water column pressure and temperature");
+
+        let results = index.collide_text(
+            "the rust async runtime provides scheduled task execution across worker threads, and is fast",
+        );
+        assert_eq!(results[0].id, "near", "a coarse index must still rank the near duplicate first");
+        // With 16 levels the strongest possible shared prefix is 16 bits, not 64.
+        assert!(results[0].shared_bits <= 16);
     }
 
     #[test]

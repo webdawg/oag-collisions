@@ -33,6 +33,14 @@ evicts the oldest item first. `capacity() == 0` means unbounded and is not offer
 an unbounded collision index is a memory-exhaustion vector, and the caller should have to ask for
 it. `insert`/`insert_text` return whether an eviction happened.
 
+**Prefix levels.** Each item is stored under every prefix of its hash, so the level count is also
+the per-item memory cost. `with_capacity_and_levels(n, levels)` trades that against ranking
+resolution: two items sharing more than `levels` bits tie. Measured on a synthetic corpus
+(`cargo run -p oag-collisions --example ranking_tradeoff`): 32 levels keeps top-1 correctness and
+drops memory to 40%, while 16 levels saves 88% and starts returning the wrong answer. The default
+stays at 64 -- full fidelity -- and the knob is there for a deployment that has measured its own
+corpus.
+
 Eviction is oldest-first rather than least-recently-used because the index has no usage statistics:
 recency is not relevance, and pretending otherwise would need a hit counter this layer does not
 have. Re-indexing an existing id replaces it and never evicts a neighbour.
@@ -57,5 +65,6 @@ cargo run -p oag-collisions --example aberration
 | `crates/oag-collisions/src/lib.rs` | SimHash, tokenization, and the bounded `CollisionIndex` |
 | `crates/oag-collisions/src/aberration.rs` | the solar-aberration experiment and its three measurements |
 | `crates/oag-collisions/examples/aberration.rs` | prints the experiment's numbers |
+| `crates/oag-collisions/examples/ranking_tradeoff.rs` | measures prefix levels against ranking quality and index size |
 | `SPEC.md` | the operator's statement, recorded verbatim |
 | `EXPERIMENTS.md` | hypotheses, procedures, results, and conclusions |

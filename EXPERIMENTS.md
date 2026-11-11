@@ -63,3 +63,46 @@ it literally.
 **Follow-up (PLANNED).** Compute the same drift for the Earth's own orbital motion and compare it
 to the classical 20.5-arcsecond annual aberration — a second, independent control that uses a speed
 known to three digits.
+
+
+---
+
+## EXP-004 — How many prefix levels can be dropped before ranking quality breaks?
+
+**Repository:** `oag-collisions`
+**Hypothesis.** The index stores every item under all 64 prefixes of its hash, costing `O(items * 64)`
+map entries. Fewer levels means proportionally less memory and a coarser ranking, because two items
+sharing more than `levels` bits tie. Somewhere between 64 and 8 there should be a level count that
+keeps the answer right.
+
+**Procedure.** `crates/oag-collisions/examples/ranking_tradeoff.rs`. A 200-token document, then 59
+variants with 2, 4, ... 118 tokens replaced. The query is the original; the correct nearest
+neighbour is the 2-token variant. Build an index at 64, 32, 16 and 8 levels and measure top-1
+correctness and bucket-entry count. Variant 0 (the identical document) is deliberately not indexed --
+an index returning the identical document ahead of the near-duplicate is correct, not confused.
+
+**Result (RUN, `550525d`+).**
+
+| prefix levels | top-1 correct | bucket entries | entry ratio |
+|---|---|---|---|
+| 64 | yes | 3108 | 1.00x |
+| 32 | yes | 1245 | **0.40x** |
+| 16 | **no** (rank 2) | 375 | 0.12x |
+| 8 | **no** (rank 2) | 77 | 0.02x |
+
+**Conclusion.** **32 levels is the measured sweet spot**: top-1 correctness is unchanged and memory
+drops to 40%. At 16 the index saves 88% and starts returning the wrong answer. So the crossover is
+between 16 and 32 on this corpus, and 64 -- the current default -- is paying 2.5x the memory of the
+best measured setting.
+
+**Scope, stated plainly.** This is **one synthetic corpus**: 200-token documents with a small number
+of token substitutions, where similarity is graded and known in advance. A corpus whose items
+routinely share very long prefixes could shift the crossover, and a corpus with short documents
+(which this layer's own tests show is where SimHash is noisy regardless) may not be served by any
+level count. The default therefore stays at 64 -- full fidelity, no silent ranking loss -- and
+`with_capacity_and_levels` is the knob for a deployment that has measured its own corpus. Changing a
+default on one synthetic result would be exactly the kind of unmeasured trade this experiment exists
+to prevent.
+
+**Follow-up (PLANNED).** Repeat the sweep on a corpus with graded *semantic* similarity rather than
+token substitutions, and on short documents, to see whether the crossover moves.
