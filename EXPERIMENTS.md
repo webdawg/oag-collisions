@@ -81,19 +81,51 @@ neighbour is the 2-token variant. Build an index at 64, 32, 16 and 8 levels and 
 correctness and bucket-entry count. Variant 0 (the identical document) is deliberately not indexed --
 an index returning the identical document ahead of the near-duplicate is correct, not confused.
 
-**Result (RUN, `550525d`+).**
+**Result (RUN, `4fcd431`).** First sweep, at a fixed 200 tokens per document:
 
-| prefix levels | top-1 correct | bucket entries | entry ratio |
-|---|---|---|---|
-| 64 | yes | 3108 | 1.00x |
-| 32 | yes | 1245 | **0.40x** |
-| 16 | **no** (rank 2) | 375 | 0.12x |
-| 8 | **no** (rank 2) | 77 | 0.02x |
+| prefix levels | top-1 correct | top tied | bucket entries | entry ratio |
+|---|---|---|---|---|
+| 64 | yes | - | 2570 | 1.00x |
+| 32 | yes | - | 995 | **0.39x** |
+| 16 | yes | **TIE** | 269 | 0.10x |
+| 8 | yes | **TIE** | 42 | 0.02x |
 
-**Conclusion.** **32 levels is the measured sweet spot**: top-1 correctness is unchanged and memory
-drops to 40%. At 16 the index saves 88% and starts returning the wrong answer. So the crossover is
-between 16 and 32 on this corpus, and 64 -- the current default -- is paying 2.5x the memory of the
-best measured setting.
+The tie column is the important one and the first version of this experiment did not report it. At
+16 and 8 levels the correct variant is still in the top set, but it is **tied** with other variants --
+so the "first" answer is arbitrary. The index has not necessarily lost the right answer; it has
+lost the ability to choose it. **32 levels is the fewest that gets top-1 right without a tie.**
+
+**Second sweep: the crossover depends on document length, and for short documents there is no
+crossover at all.** Same corpus shape, varying only how much text the hash sees:
+
+| tokens | top-1 correct at 64 levels | fewest levels that works |
+|---|---|---|
+| 200 | yes | 32 |
+| 60 | **no** | none |
+| 20 | **no** | none |
+| 8 | **no** | none |
+
+The diagnostic shows why: at 200 tokens the correct variant wins on **51 shared bits**; at 60
+tokens the best hit is an unrelated variant on **11 bits**, which is chance level; at 20 and 8
+tokens **nothing crosses the 8-bit collision threshold at all**.
+
+**Conclusion, corrected.** The earlier reading of this experiment was "32 levels is the sweet spot".
+That holds only for long documents. The real result is twofold:
+
+1. **For long documents**, 32 levels is the measured sweet spot -- correctness unchanged, memory at
+   39%.
+2. **For short documents, no level count works.** The unigram SimHash is a majority vote over bit
+   positions, and with few tokens each bit's vote is decided by noise, so the hash itself carries no
+   signal. The level knob trades away resolution that does not exist.
+
+The second point is the more important one, and it is consistent with this crate's own tests, which
+had to use realistic-length texts rather than asserting on 2-4 token inputs.
+
+**Scope, stated plainly.** One synthetic corpus generator: token substitutions on synthetic
+documents, with similarity graded by construction. The 200-token figure is where this generator
+happens to cross into signal; a corpus with genuinely different structure could move it. What is
+*not* generator-specific is the mechanism -- a majority vote over 64 bit positions needs enough
+tokens for the vote to be decided by content rather than noise.
 
 **Scope, stated plainly.** This is **one synthetic corpus**: 200-token documents with a small number
 of token substitutions, where similarity is graded and known in advance. A corpus whose items
@@ -104,5 +136,7 @@ level count. The default therefore stays at 64 -- full fidelity, no silent ranki
 default on one synthetic result would be exactly the kind of unmeasured trade this experiment exists
 to prevent.
 
-**Follow-up (PLANNED).** Repeat the sweep on a corpus with graded *semantic* similarity rather than
-token substitutions, and on short documents, to see whether the crossover moves.
+**Follow-up (PLANNED).** Hash **word bigrams** rather than unigrams. That both multiplies the token
+count for short documents (a 20-token text yields 19 bigrams plus 20 unigrams) and captures word
+order, which unigram SimHash deliberately discards. If the short-document failure is a token-count
+problem, this should move it; if it is a signal problem, nothing will. Measured, not assumed.
