@@ -140,3 +140,50 @@ to prevent.
 count for short documents (a 20-token text yields 19 bigrams plus 20 unigrams) and captures word
 order, which unigram SimHash deliberately discards. If the short-document failure is a token-count
 problem, this should move it; if it is a signal problem, nothing will. Measured, not assumed.
+
+
+---
+
+## EXP-005 — Does bigram shingling fix the short-document failure?
+
+**Repository:** `oag-collisions`
+**Hypothesis.** The short-document failure is a token-count problem: unigram SimHash is a majority
+vote over bit positions, and with few tokens the vote is decided by noise. Shingling (unigrams plus
+word bigrams) nearly doubles the vote for a short text and captures word order, so it should move
+the failure.
+
+**Procedure.** Added `shingles(tokens, max_n)` and a per-index `shingle` setting
+(`with_capacity_levels_and_shingle`), then re-ran the length sweep at full resolution with shingle=1
+and shingle=2 on the same corpora.
+
+**Result (RUN, `89044f9`+).**
+
+| tokens | unigram top-1 | bigram top-1 | bigram tie |
+|---|---|---|---|
+| 200 | yes | **NO** | - |
+| 60 | no | no | - |
+| 20 | no | no | - |
+| 8 | no | no | - |
+
+**The hypothesis is falsified, and in the more informative direction: bigram shingling does not fix
+the short-document failure and it *degrades* the long-document case.**** At 200 tokens the unigram
+index returns variant-1 at **51 shared bits**; the bigram index returns a single result above the
+collision threshold, variant-10 at **8 bits**, and the correct answer is not in the result set at
+all.
+
+**What this means.** Shingling is not a fix for short documents in this scheme. The likely mechanism
+-- recorded as a hypothesis, not a result -- is that bigrams drawn from overlapping windows are
+strongly correlated with each other and with the unigrams they contain, so they add vote *weight*
+without adding independent information, and the extra weight reshapes the majority in a way that is
+not monotone in document distance. That explanation is not verified; what is verified is the
+behaviour.
+
+**Consequence for the layer.** The `shingle` knob stays, because the measurement is one synthetic
+corpus and a genuinely different corpus could go the other way -- but it ships defaulting to 1
+(unigrams) and the negative result is recorded next to it. Nobody should "fix" short-document
+performance with bigrams on the strength of an intuition.
+
+**Follow-up (PLANNED).** If short-document similarity is needed, the thing to test next is a
+*character* n-gram hash rather than a word n-gram: character shingles are correlated too, but they
+do not depend on tokenization at all, which removes a whole class of failure from the measurement.
+Measured, not assumed.

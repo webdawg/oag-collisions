@@ -40,6 +40,32 @@ pub const HASH_BITS: u32 = 64;
 /// it was bounded.
 pub const DEFAULT_MAX_ITEMS: usize = 100_000;
 
+/// Expands a token list into unigrams plus contiguous n-grams up to `max_n`.
+///
+/// Why: unigram SimHash is a majority vote over bit positions, and with few tokens each bit's vote
+/// is decided by noise -- measured in `examples/ranking_tradeoff.rs`: a 60-token document produces
+/// chance-level rankings and a 20-token document produces nothing above the collision threshold at
+/// all. Shingling attacks that directly: a 20-token text yields 20 unigrams plus 19 bigrams, nearly
+/// doubling the vote, and it captures word order, which unigram SimHash deliberately discards.
+///
+/// `max_n` is clamped to at least 1; asking for 1 returns the tokens unchanged.
+pub fn shingles(tokens: &[String], max_n: usize) -> Vec<String> {
+    let max_n = max_n.max(1);
+    if max_n == 1 {
+        return tokens.to_vec();
+    }
+    let mut out = tokens.to_vec();
+    for n in 2..=max_n {
+        if tokens.len() < n {
+            break;
+        }
+        for window in tokens.windows(n) {
+            out.push(window.join(" "));
+        }
+    }
+    out
+}
+
 /// The minimum shared prefix for two items to count as a collision at all.
 ///
 /// Below this the shared bits are noise: two random 64-bit hashes share ~1 bit on average, so a
@@ -122,6 +148,9 @@ pub struct CollisionIndex {
     /// and a coarser ranking, since two items sharing more than `levels` bits are tied. Whether
     /// that trade is worth making is measured in `examples/ranking_tradeoff.rs`, not assumed.
     prefix_levels: u32,
+    /// How many tokens to combine into one hashed unit: 1 is unigrams (the default), 2 adds
+    /// word bigrams. See [`shingles`] for why the default is not always enough.
+    shingle: usize,
 }
 
 impl Default for CollisionIndex {
@@ -148,13 +177,27 @@ impl CollisionIndex {
     /// `prefix_levels` is clamped to `[1, HASH_BITS]`. A level count of 1 indexes only exact-hash
     /// matches; [`HASH_BITS`] resolves every possible shared prefix.
     pub fn with_capacity_and_levels(max_items: usize, prefix_levels: u32) -> Self {
+        Self::with_capacity_levels_and_shingle(max_items, prefix_levels, 1)
+    }
+
+    /// As [`Self::with_capacity_and_levels`], with an explicit shingle size.
+    ///
+    /// `shingle = 2` hashes unigrams and word bigrams together, which is the measured fix to try
+    /// for short documents -- see [`shingles`].
+    pub fn with_capacity_levels_and_shingle(max_items: usize, prefix_levels: u32, shingle: usize) -> Self {
         Self {
             buckets: HashMap::new(),
             hashes: HashMap::new(),
             order: std::collections::VecDeque::new(),
             max_items,
             prefix_levels: prefix_levels.clamp(1, HASH_BITS),
+            shingle: shingle.max(1),
         }
+    }
+
+    /// The shingle size this index hashes with.
+    pub fn shingle(&self) -> usize {
+        self.shingle
     }
 
     /// How many prefix levels this index resolves.
@@ -260,10 +303,11 @@ impl CollisionIndex {
         results
     }
 
-    /// Convenience for free text.
+    /// Convenience for free text, expanded with this index's shingle size.
     pub fn collide_text(&self, text: &str) -> Vec<Collision<'_>> {
         let tokens = tokenize(text);
-        let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+        let expanded = shingles(&tokens, self.shingle);
+        let refs: Vec<&str> = expanded.iter().map(String::as_str).collect();
         self.collide(&refs)
     }
 

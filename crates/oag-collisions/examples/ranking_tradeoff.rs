@@ -70,6 +70,24 @@ fn measure(words: usize, variants: usize, levels: u32) -> (bool, bool, Option<us
     (rank == Some(1), top_tied, rank, index.bucket_entries())
 }
 
+/// Builds an index with the given shingle size and asks the query. Returns (top-1 correct, tied).
+fn build_and_ask(words: usize, variants: usize, shingle: usize) -> (bool, bool) {
+    let documents = corpus(words, variants);
+    let mut index = CollisionIndex::with_capacity_levels_and_shingle(10_000, HASH_BITS, shingle);
+    for (position, document) in documents.iter().enumerate().skip(1) {
+        let text = document.join(" ");
+        index.insert_text(&format!("variant-{position}"), &text);
+    }
+    let results = index.collide_text(&documents[0].join(" "));
+    let correct = format!("variant-1");
+    let rank = results.iter().position(|c| c.id == correct).map(|p| p + 1);
+    let top_tied = results
+        .first()
+        .map(|first| results.iter().filter(|c| c.shared_bits == first.shared_bits).count() > 1)
+        .unwrap_or(false);
+    (rank == Some(1), top_tied)
+}
+
 fn main() {
     println!("ranking trade-off: prefix levels vs quality vs size");
     println!("===================================================");
@@ -148,6 +166,40 @@ fn main() {
             .collect();
         println!("{words:>5} tokens: {}", top.join(", "));
     }
+
+    // Third sweep: the recorded follow-up. Unigram SimHash is a majority vote over bit
+    // positions, and short documents do not give the vote enough tokens to be decided by content.
+    // Shingling (unigrams + word bigrams) nearly doubles the vote for a short text and captures
+    // word order. Does it move the short-document failure?
+    println!();
+    println!("does bigram shingling fix the short-document failure?");
+    println!("===================================================");
+    println!("{:>8} {:>14} {:>14} {:>14}", "tokens", "unigram top-1", "bigram top-1", "bigram tie");
+    for words in [200_usize, 60, 20, 8] {
+        let unigram = build_and_ask(words, variants, 1);
+        let bigram = build_and_ask(words, variants, 2);
+        println!(
+            "{:>8} {:>14} {:>14} {:>14}",
+            words,
+            if unigram.0 { "yes" } else { "NO" },
+            if bigram.0 { "yes" } else { "NO" },
+            if bigram.1 { "TIE" } else { "-" },
+        );
+    }
+
+    println!();
+    println!("diagnostic: bigram ranking at 200 tokens, top 5");
+    println!("==================================================");
+    let documents = corpus(200, variants);
+    let mut index = CollisionIndex::with_capacity_levels_and_shingle(10_000, HASH_BITS, 2);
+    for (position, document) in documents.iter().enumerate().skip(1) {
+        index.insert_text(&format!("variant-{position}"), &document.join(" "));
+    }
+    let results = index.collide_text(&documents[0].join(" "));
+    for collision in results.iter().take(5) {
+        println!("  {:<14} {} shared bits", collision.id, collision.shared_bits);
+    }
+    println!("  (correct is variant-1; unigram top was variant-1 at 51 bits)");
 
     println!();
     println!("read the second table as the real result: for short documents no level count gets");
