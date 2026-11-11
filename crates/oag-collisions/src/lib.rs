@@ -565,6 +565,38 @@ impl CollisionIndex {
 mod tests {
     use super::*;
 
+    /// The shuffled budget is the stride budget's counterpart: same unit budget, no periodic
+    /// blind spot. Both properties are asserted -- the budget is honoured and the sample is
+    /// deterministic for a given seed (and differs between seeds).
+    #[test]
+    fn the_shuffled_budget_honours_its_target_and_is_seed_deterministic() {
+        let text = (0..1000).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ");
+        let at = |seed: u64| {
+            Tokenizer::WordsShuffledBudget {
+                shingle: 1,
+                unigram_weight: 1,
+                bigram_weight: 0,
+                target_units: 50,
+                seed,
+            }
+            .tokenize(&text)
+        };
+        assert_eq!(at(1).len(), 50, "a 1000-token document must hash exactly 50 units");
+        assert_eq!(at(1), at(1), "the same seed must give the same sample");
+        assert_ne!(at(1), at(2), "different seeds should give different samples");
+
+        // Under budget the document is passed through unsampled, as with the stride variant.
+        let short = Tokenizer::WordsShuffledBudget {
+            shingle: 1,
+            unigram_weight: 1,
+            bigram_weight: 0,
+            target_units: 50,
+            seed: 1,
+        }
+        .tokenize("alpha beta gamma");
+        assert_eq!(short.len(), 3);
+    }
+
     /// The budget tokenizer exists because every measurement points at the unit count as the
     /// binding constraint. It holds that count fixed regardless of document length, so sensitivity
     /// should stop depending on length. Two properties matter and are asserted: the budget is
