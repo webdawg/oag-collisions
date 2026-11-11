@@ -758,3 +758,49 @@ is inferred from the spread across positions rather than measured directly.
 *windows* rather than individual tokens. A window spans several tokens, so a small edit changes
 every window that overlaps it -- that is neither a periodic blind spot nor a clustering coin flip,
 and it may dominate both. Unmeasured.
+
+
+---
+
+## EXP-016 — Window sampling: spread coverage *and* no blind spot
+
+**Repository:** `oag-collisions`
+**Hypothesis.** EXP-015 left a third option: hash a fixed budget of *windows* (runs of `window`
+consecutive tokens) rather than individual tokens. A 2-token edit touches 2 of 800 token-units; it
+touches every window overlapping it -- about `window + 1` of them. Neither a periodic blind spot nor
+a clustering coin flip, and the scheme may dominate both.
+
+**Procedure.** New `Tokenizer::WordsWindowBudget`. Same 800-token document, same budget of 200
+(stride 4 for tokens; the 798 candidate windows are sampled with the same stride). Edits placed at
+a stride boundary (sampled) and halfway between (not sampled).
+
+**Result (RUN, `ca9c2f4`+).**
+
+| edit at | stride (token) | windows (3-wide) |
+|---|---|---|
+| 0-1 (on stride) | 1.0 | 1.0 |
+| 2-3 (between) | **0.0** | **1.0** |
+| 4-5 (on stride) | 1.0 | 2.0 |
+| 6-7 (between) | **0.0** | **1.0** |
+
+**Conclusion.** The window scheme has **no zeros**: it detects the edit at every position tested,
+including both between-stride positions, with peak values (1.0-2.0 bits) comparable to the stride's
+peak. It therefore combines the two properties the earlier schemes split between them:
+
+- the **stride's** spread coverage and deterministic, position-independent unit selection;
+- the **shuffle's** absence of any periodic blind spot.
+
+The cost is granularity: a unit is a 3-token window, so a change anywhere inside it replaces the
+whole window's hash. The index says *which window* changed, not *which token* -- acceptable for
+near-duplicate detection, not for localising an edit.
+
+**Honest limits.** One window width (3), one document size (800 tokens), one budget (25%), one
+seed for the window scheme. The window scheme's own stride still has a periodic structure -- it
+samples candidate windows every 4 -- but because each sampled unit covers 3 tokens, an edit is
+caught as long as it overlaps any sampled window, which is 4 tokens wide in coverage rather than 1.
+A wider window would widen that further at the cost of coarser units.
+
+**Follow-up (PLANNED).** Measure the false-negative rate of each scheme as a function of edit
+position over many positions and seeds, rather than four hand-picked ones. The hand-picked test
+shows the blind spot exists and that windows remove it at the sampled points; it does not show the
+rate, and the rate is what would justify choosing one scheme in a deployment.

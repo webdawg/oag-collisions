@@ -124,6 +124,20 @@ pub enum Tokenizer {
         target_units: usize,
         seed: u64,
     },
+    /// Hash a fixed budget of *windows* -- runs of `window` consecutive tokens -- rather than
+    /// individual tokens.
+    ///
+    /// This is the third sampling scheme, and the one neither stride nor shuffle addresses. A
+    /// 2-token edit in an 800-token document touches 2 of 800 units under token sampling. Under
+    /// window sampling it touches every window that overlaps it: about `window + 1` of them. With
+    /// `window = 3` that is 4 units instead of 2, and more importantly the affected units are
+    /// *spread* rather than adjacent, so a stride's periodic blind spot is far less likely to miss
+    /// all of them. The cost is that each unit is coarser: two documents differing only inside one
+    /// window share that window's replacement, so the hash reflects a blend rather than a position.
+    WordsWindowBudget {
+        window: usize,
+        target_units: usize,
+    },
 }
 
 impl Default for Tokenizer {
@@ -171,6 +185,24 @@ impl Tokenizer {
                 if units.len() > target {
                     // Stride sample: keeps the sample spread across the document rather than
                     // truncating it, and is fully deterministic.
+                    let stride = (units.len() + target - 1) / target;
+                    units = units.into_iter().step_by(stride).take(target).collect();
+                }
+                units
+            }
+            Tokenizer::WordsWindowBudget { window, target_units } => {
+                let tokens = tokenize(text);
+                let window = (*window).max(1);
+                let mut units: Vec<(String, i32)> = Vec::new();
+                if tokens.len() >= window {
+                    for slice in tokens.windows(window) {
+                        units.push((slice.join(" "), 1));
+                    }
+                } else {
+                    units.push((tokens.join(" "), 1));
+                }
+                let target = (*target_units).max(1);
+                if units.len() > target {
                     let stride = (units.len() + target - 1) / target;
                     units = units.into_iter().step_by(stride).take(target).collect();
                 }
@@ -230,6 +262,9 @@ impl Tokenizer {
             }
             Tokenizer::WordsShuffledBudget { target_units, .. } => {
                 format!("word units, shuffled budget {target_units}")
+            }
+            Tokenizer::WordsWindowBudget { window, target_units } => {
+                format!("word windows of {window}, budget {target_units}")
             }
         }
     }
@@ -595,6 +630,32 @@ mod tests {
         }
         .tokenize("alpha beta gamma");
         assert_eq!(short.len(), 3);
+    }
+
+    /// The window scheme is the third sampling design: same budget, overlapping coverage, so a
+    /// small edit changes every window that overlaps it. Both properties are asserted.
+    #[test]
+    fn the_window_budget_honours_its_target_and_is_deterministic() {
+        let text = (0..1000).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ");
+        let at = |window: usize| {
+            Tokenizer::WordsWindowBudget { window, target_units: 50 }.tokenize(&text)
+        };
+        let units = at(3);
+        assert_eq!(units.len(), 50, "a 1000-token document must hash exactly 50 windows");
+        assert_eq!(units, at(3), "window sampling must be deterministic");
+
+        // Every unit is a 3-token window, not a single token -- that width is what lets a small
+        // edit change a unit without the edit having to land on a sampled position. The sampled
+        // units themselves are stride-spaced, so they do not overlap each other.
+        assert!(
+            units.iter().all(|(unit, w)| unit.split(' ').count() == 3 && *w == 1),
+            "every unit must be a 3-token window at weight 1"
+        );
+
+        // A document shorter than one window is passed through as a single unit.
+        let short = Tokenizer::WordsWindowBudget { window: 3, target_units: 50 }
+            .tokenize("alpha beta");
+        assert_eq!(short.len(), 1);
     }
 
     /// The budget tokenizer exists because every measurement points at the unit count as the

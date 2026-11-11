@@ -8,7 +8,7 @@
 //!
 //! Run with `cargo run -p oag-collisions --example ranking_tradeoff`.
 
-use oag_collisions::{tokenize, CollisionIndex, Tokenizer, HASH_BITS};
+use oag_collisions::{simhash_weighted, tokenize, CollisionIndex, Tokenizer, HASH_BITS};
 
 /// A deterministic generator, so the corpus is identical on every run. A tiny LCG is enough; this
 /// is test data, not a beacon.
@@ -376,6 +376,59 @@ fn main() {
             format!("{}/{}", positive, margins.len()),
         );
     }
+    // EXP-016: the third sampling scheme. A window spans `window` tokens, so a small edit changes
+    // every window overlapping it -- the stride's periodic blind spot should shrink to "at most
+    // the fraction of windows that miss the edit".
+    println!();
+    println!("stride versus windows: coverage of a 2-token edit");
+    println!("==================================================");
+    println!("document 800 tokens, budget 200 -> stride 4, windows of 3 sampled the same way");
+    println!();
+    println!(
+        "{:>10} {:>16} {:>16}",
+        "edit at", "stride (token)", "windows (3-wide)"
+    );
+    let flat: Vec<String> = (0..800).map(|i| format!("w{i}")).collect();
+    // With stride 4 the sampled positions are multiples of 4; the blind spots are the
+    // positions between them (2, 6, ...). Testing both kinds is the point.
+    for offset in [0_usize, 2, 4, 6] {
+        let base = flat.clone();
+        let mut changed = base.clone();
+        changed[offset] = "x111111".into();
+        changed[offset + 1] = "x222222".into();
+        let measure = |tokenizer: &dyn Fn(&str) -> Vec<(String, i32)>| -> f64 {
+            let base_units = tokenizer(&base.join(" "));
+            let base_refs: Vec<(&str, i32)> =
+                base_units.iter().map(|(unit, w)| (unit.as_str(), *w)).collect();
+            let units = tokenizer(&changed.join(" "));
+            let refs: Vec<(&str, i32)> =
+                units.iter().map(|(unit, w)| (unit.as_str(), *w)).collect();
+            (simhash_weighted(&base_refs) ^ simhash_weighted(&refs)).count_ones() as f64
+        };
+        let stride_fn = |text: &str| {
+            Tokenizer::WordsBudget {
+                shingle: 1,
+                unigram_weight: 1,
+                bigram_weight: 0,
+                target_units: 200,
+            }
+            .tokenize(text)
+        };
+        let window_fn = |text: &str| {
+            Tokenizer::WordsWindowBudget { window: 3, target_units: 200 }.tokenize(text)
+        };
+        println!(
+            "{:>10} {:>16.1} {:>16.1}",
+            format!("{}-{}", offset, offset + 1),
+            measure(&stride_fn),
+            measure(&window_fn)
+        );
+    }
+    println!();
+    println!("the stride's zeros are the periodic blind spot. The window scheme should show no zeros,");
+    println!("because every window overlapping the edit changes; its cost is coarser units, which is");
+    println!("why its per-position values are lower than the stride's peak.");
+
     println!();
     println!("read this as: a setting whose mean margin is positive across most corpora is doing the");
     println!("right thing for a reason. One that hovers around zero with a large standard deviation is");
