@@ -47,6 +47,13 @@ evicts the oldest item first. `capacity() == 0` means unbounded and is not offer
 an unbounded collision index is a memory-exhaustion vector, and the caller should have to ask for
 it. `insert`/`insert_text` return whether an eviction happened.
 
+**Unit budget.** `Tokenizer::WordsBudget` samples a deterministic stride of the document's word
+units so the unit count is bounded regardless of length -- the trade is coverage for resolution,
+and it is the mechanism every measurement points at. With a budget of 50, document sizes from 100
+to 800 tokens all land in the same 2.4-4.9 bit sensitivity band, against 0.5-0.9 for an unbudgeted
+800-token document. The budget, not the document length, becomes the tuning knob. See EXP-014 in
+`EXPERIMENTS.md`.
+
 **Prefix levels.** Each item is stored under every prefix of its hash, so the level count is also
 the per-item memory cost. `with_capacity_and_levels(n, levels)` trades that against ranking
 resolution: two items sharing more than `levels` bits tie. Measured on a synthetic corpus
