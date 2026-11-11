@@ -434,6 +434,87 @@ fn main() {
     println!("right thing for a reason. One that hovers around zero with a large standard deviation is");
     println!("a coin flip, and its top-1 result on any single corpus means nothing.");
 
+    // EXP-017: the false-negative rate. Everything above samples a handful of positions; the
+    // rate over many positions is what would justify choosing a scheme in a deployment.
+    println!();
+    println!("false-negative rate by edit position (800 tokens, budget 200, 8 seeds per position)");
+    println!("===================================================================================");
+    let tokens = 800;
+    let budget = 200;
+    let seeds = 8_u64;
+    let flat = |n: usize| -> Vec<String> { (0..n).map(|i| format!("w{i}")).collect() };
+    let schemes: [(&str, Tokenizer, Tokenizer, Tokenizer); 1] = [("", Tokenizer::WordsBudget { shingle: 1, unigram_weight: 1, bigram_weight: 0, target_units: budget }, Tokenizer::WordsShuffledBudget { shingle: 1, unigram_weight: 1, bigram_weight: 0, target_units: budget, seed: 0 }, Tokenizer::WordsWindowBudget { window: 3, target_units: budget })];
+    let _ = schemes;
+    let stride = Tokenizer::WordsBudget { shingle: 1, unigram_weight: 1, bigram_weight: 0, target_units: budget };
+    let shuffle = Tokenizer::WordsShuffledBudget { shingle: 1, unigram_weight: 1, bigram_weight: 0, target_units: budget, seed: 0 };
+    let window = Tokenizer::WordsWindowBudget { window: 3, target_units: budget };
+
+    // Shuffle needs a seed per (position, seed) pair to be a fair sample, so it is rebuilt
+    // inside the loop; the other two are position-independent and built once.
+    let base_text = flat(tokens).join(" ");
+    let stride_base = stride.tokenize(&base_text);
+    let stride_base_refs: Vec<(&str, i32)> =
+        stride_base.iter().map(|(u, w)| (u.as_str(), *w)).collect();
+    let window_base = window.tokenize(&base_text);
+    let window_base_refs: Vec<(&str, i32)> =
+        window_base.iter().map(|(u, w)| (u.as_str(), *w)).collect();
+
+    let sample_positions: Vec<usize> = (0..tokens - 2).step_by(2).collect();
+    let mut counts = [0_usize; 3];
+    let mut trials = 0_usize;
+    for offset in &sample_positions {
+        for seed in 0..seeds {
+            let mut changed = flat(tokens);
+            let mut rng = Lcg(0x5EED + seed * 7919);
+            changed[*offset] = format!("x{}", rng.next() % 1_000_000);
+            changed[*offset + 1] = format!("x{}", rng.next() % 1_000_000);
+            let changed_text = changed.join(" ");
+
+            let detected = |base_refs: &Vec<(&str, i32)>, units: &Vec<(String, i32)>| -> bool {
+                let refs: Vec<(&str, i32)> =
+                    units.iter().map(|(u, w)| (u.as_str(), *w)).collect();
+                (simhash_weighted(base_refs) ^ simhash_weighted(&refs)).count_ones() > 0
+            };
+
+            let stride_hit = detected(&stride_base_refs, &stride.tokenize(&changed_text));
+            let shuffle_tokenizer = Tokenizer::WordsShuffledBudget {
+                shingle: 1,
+                unigram_weight: 1,
+                bigram_weight: 0,
+                target_units: budget,
+                seed: 0x5EED + seed * 7919,
+            };
+            let shuffle_base = shuffle_tokenizer.tokenize(&base_text);
+            let shuffle_base_refs: Vec<(&str, i32)> =
+                shuffle_base.iter().map(|(u, w)| (u.as_str(), *w)).collect();
+            let shuffle_hit = detected(&shuffle_base_refs, &shuffle_tokenizer.tokenize(&changed_text));
+            let window_hit = detected(&window_base_refs, &window.tokenize(&changed_text));
+
+            counts[0] += usize::from(stride_hit);
+            counts[1] += usize::from(shuffle_hit);
+            counts[2] += usize::from(window_hit);
+            trials += 1;
+        }
+    }
+    println!(
+        "{:>12} {:>14} {:>14} {:>14}",
+        "scheme", "detected", "missed", "rate"
+    );
+    for (name, hits) in [("stride", counts[0]), ("shuffle", counts[1]), ("windows", counts[2])] {
+        println!(
+            "{:>12} {:>14} {:>14} {:>13.1}%",
+            name,
+            hits,
+            trials - hits,
+            100.0 * hits as f64 / trials as f64
+        );
+    }
+    println!();
+    println!("the stride's rate should be near 50% -- it samples every fourth position, so an edit");
+    println!("starting on a sampled position is caught and one starting between is not. The shuffle");
+    println!("and windows should be near 100%. The gap between them is the variance-versus-granularity");
+    println!("trade, now measured rather than asserted.");
+
     // EXP-012 located the binding constraint at the unit count, and the EXP-007 surface says a
     // 2-token edit is comfortably visible at 50-100 units (~4-6 bits) but marginal at 200. Repeat
     // the margin measurement there: do the tokenizer settings separate in the resolvable band?

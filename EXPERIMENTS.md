@@ -783,9 +783,12 @@ a stride boundary (sampled) and halfway between (not sampled).
 | 4-5 (on stride) | 1.0 | 2.0 |
 | 6-7 (between) | **0.0** | **1.0** |
 
-**Conclusion.** The window scheme has **no zeros**: it detects the edit at every position tested,
-including both between-stride positions, with peak values (1.0-2.0 bits) comparable to the stride's
-peak. It therefore combines the two properties the earlier schemes split between them:
+**Conclusion -- corrected by EXP-017.** The window scheme has **no zeros** at the positions
+tested, but EXP-017 measured the *rate* over many positions and found the reason is coverage, not
+the absence of a blind spot: each window spans 3 tokens, so a sampled window is likely to include
+the edited tokens. The shuffle has no blind spot but samples the same *fraction* of tokens, so its
+rate is nearly the stride's. The window advantage is real but it comes from unit width. See the
+correction below before quoting the "dominates both" claim.
 
 - the **stride's** spread coverage and deterministic, position-independent unit selection;
 - the **shuffle's** absence of any periodic blind spot.
@@ -804,3 +807,57 @@ A wider window would widen that further at the cost of coarser units.
 position over many positions and seeds, rather than four hand-picked ones. The hand-picked test
 shows the blind spot exists and that windows remove it at the sampled points; it does not show the
 rate, and the rate is what would justify choosing one scheme in a deployment.
+
+
+---
+
+## EXP-017 — False-negative rate: coverage matters, not periodicity
+
+**Repository:** `oag-collisions`
+**Hypothesis.** EXP-016 showed windows remove the stride's zeros at four hand-picked positions.
+That does not establish a *rate*, and the hand-picked positions could be misleading. This measures
+the false-negative rate of all three schemes over many positions and seeds.
+
+**Procedure.** 800-token document, budget 200 (stride 4). For every second position in 0..798, and
+8 seeds, replace two tokens and count how often the hash moves at all. Report detected / missed /
+rate.
+
+**Result (RUN, `a819f12`+).**
+
+| scheme | detected | missed | rate |
+|---|---|---|---|
+| stride | 1130 | 2062 | 35.4% |
+| shuffle | 1296 | 1896 | 40.6% |
+| windows | 2762 | 430 | **86.5%** |
+
+**This corrects EXP-015 and EXP-016's framing.** The window scheme wins, but not because it lacks a
+periodic blind spot:
+
+- **The shuffle has no blind spot and is barely better than the stride** -- 40.6% vs 35.4%. Both
+  sample 200 of 800 units, so a 2-token edit has roughly the same chance of being sampled at all
+  (~50% by position, less after the vote absorbs a single-unit change). Removing periodicity
+  changes *which* positions fail, not *how many*.
+- **The window scheme's advantage is unit width.** Each window spans 3 tokens, so a sampled window
+  is likely to include the edited tokens: effective coverage is 600 of 800 token positions rather
+  than 200. That is where the 86.5% comes from.
+- **The stride's 35.4% is below the naive 50%** for the same reason the shuffle's is: even when an
+  edited token *is* sampled, changing one unit out of 200 does not always flip a bit -- the
+  majority vote absorbs a single-unit change unless it was within one of a tie.
+
+**Conclusion.** At equal budget, the binding quantity is **coverage** -- how many token positions a
+unit spans -- not whether the sampling pattern is periodic. Periodicity decides *which* edits are
+missed (systematically, for a whole residue class), while coverage decides *how many*. A deployment
+that needs a predictable worst case should prefer windows; one that needs an even distribution of
+misses should prefer the shuffle; the stride is dominated on both counts but is the cheapest to
+reason about.
+
+**Honest limits.** One document size, one budget, word unigrams, and "detected" means *any* bit
+moved, not that the edit was localised or correctly ranked. The rates are for detection only; the
+ranking quality behind each scheme is measured separately and was found to be within noise
+(EXP-012).
+
+**Follow-up (PLANNED).** Repeat the rate measurement while varying the window width (2, 3, 5) at a
+fixed budget. The prediction from the coverage argument: the rate should scale with the fraction of
+token positions covered, so window 5 should approach 100% and window 2 should fall toward the
+shuffle's. If it does, coverage is confirmed as the mechanism; if not, something else is driving
+the window scheme's advantage.
