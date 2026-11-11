@@ -24,12 +24,12 @@ impl Lcg {
 /// Builds a document of `words` tokens and `variants - 1` degraded copies, each with 2, 4, 6, ...
 /// tokens replaced. The original is element 0 and is never indexed -- an index that returns the
 /// identical document ahead of the near-duplicate is correct, not confused.
-fn corpus(words: usize, requested_variants: usize) -> Vec<Vec<String>> {
+fn corpus_with_seed(words: usize, requested_variants: usize, seed: u64) -> Vec<Vec<String>> {
     // Never replace more than half the document: past that the variants stop being graded
     // similarities and become unrelated documents, which measures something else entirely. So the
     // variant count is capped to keep every variant within that bound.
     let variants = requested_variants.min(words / 4 + 1);
-    let mut rng = Lcg(0x5EED);
+    let mut rng = Lcg(seed);
     let base: Vec<String> = (0..words).map(|i| format!("w{i}")).collect();
     let mut out = Vec::new();
     for v in 0..variants {
@@ -45,6 +45,35 @@ fn corpus(words: usize, requested_variants: usize) -> Vec<Vec<String>> {
 
 /// One measurement. `correct` is the variant with the fewest replacements.
 /// Returns (top-1 correct, was the top a tie, mean rank of the correct item, bucket entries).
+fn corpus(words: usize, variants: usize) -> Vec<Vec<String>> {
+    corpus_with_seed(words, variants, 0x5EED)
+}
+
+/// The margin between the closest variant and the next one, in shared bits.
+///
+/// This is the metric that replaces exact top-1. EXP-011 showed top-1 flips between adjacent
+/// parameter settings, so a single corpus cannot distinguish "this setting ranks correctly" from
+/// "this setting got lucky". The margin is a magnitude rather than a position: a positive margin
+/// means the correct variant is closest, and measuring it across several corpora shows whether
+/// that is consistent or a coin flip.
+fn margin(words: usize, variants: usize, levels: u32, tokenizer: Tokenizer, seed: u64) -> Option<i32> {
+    let documents = corpus_with_seed(words, variants, seed);
+    let query = &documents[0];
+    let mut index = CollisionIndex::with_tokenizer(10_000, levels, tokenizer);
+    for (position, document) in documents.iter().enumerate().skip(1) {
+        index.insert_text(&format!("variant-{position}"), &document.join(" "));
+    }
+    let results = index.collide_text(&query.join(" "));
+    let first = results.iter().find(|c| c.id == "variant-1")?.shared_bits;
+    let second = results
+        .iter()
+        .filter(|c| c.id != "variant-1")
+        .map(|c| c.shared_bits)
+        .max()
+        .unwrap_or(0);
+    Some(first as i32 - second as i32)
+}
+
 fn measure(words: usize, variants: usize, levels: u32) -> (bool, bool, Option<usize>, usize) {
     let documents = corpus(words, variants);
     let query = &documents[0];
@@ -292,6 +321,65 @@ fn main() {
     for collision in results.iter().take(5) {
         println!("  {:<14} {} shared bits", collision.id, collision.shared_bits);
     }
+
+    // EXP-011: top-1 flips between adjacent settings, so it cannot be the tuning metric. The
+    // margin between the correct variant and the next one, averaged over several corpora, is a
+    // magnitude rather than a coin flip.
+    println!();
+    println!("margin between the correct variant and the next one, over 8 corpora");
+    println!("=============================================================");
+    println!(
+        "{:>8} {:>8} {:>8} {:>12} {:>12} {:>12}",
+        "unigram", "bigram", "ratio", "mean margin", "std dev", "positive"
+    );
+    for (unigram, bigram) in [
+        (1_i32, 0_i32),
+        (1, 1),
+        (1, 2),
+        (1, 4),
+        (2, 1),
+        (1, 3),
+    ] {
+        let tokenizer =
+            Tokenizer::Words { shingle: 2, unigram_weight: unigram, bigram_weight: bigram };
+        let corpora = 8_u64;
+        let mut margins: Vec<i32> = Vec::new();
+        let mut invisible = 0_usize;
+        for seed in 0..corpora {
+            match margin(200, variants, HASH_BITS, tokenizer, 0x5EED + seed * 7919) {
+                Some(m) => margins.push(m),
+                // No margin means variant-1 never reached the collision threshold at all -- it is
+                // not outranked, it is invisible. That is a different and worse failure than
+                // losing a ranking, and the old top-1 metric reported it as a plain "no".
+                None => invisible += 1,
+            }
+        }
+        if margins.is_empty() {
+            println!(
+                "{:>8} {:>8} {:>8} {:>12} {:>12} {:>12}",
+                unigram, bigram, format!("{:.2}", bigram as f64 / unigram as f64),
+                "--", "--", format!("0/{} invisible {invisible}", corpora)
+            );
+            continue;
+        }
+        let mean = margins.iter().sum::<i32>() as f64 / margins.len() as f64;
+        let variance =
+            margins.iter().map(|m| (*m as f64 - mean).powi(2)).sum::<f64>() / margins.len() as f64;
+        let positive = margins.iter().filter(|m| **m > 0).count();
+        println!(
+            "{:>8} {:>8} {:>8} {:>12.1} {:>12.1} {:>12}",
+            unigram,
+            bigram,
+            format!("{:.2}", bigram as f64 / unigram as f64),
+            mean,
+            variance.sqrt(),
+            format!("{}/{}", positive, margins.len()),
+        );
+    }
+    println!();
+    println!("read this as: a setting whose mean margin is positive across most corpora is doing the");
+    println!("right thing for a reason. One that hovers around zero with a large standard deviation is");
+    println!("a coin flip, and its top-1 result on any single corpus means nothing.");
 
     println!();
     println!("read the second table as the real result: for short documents no level count gets");

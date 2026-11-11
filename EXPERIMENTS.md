@@ -530,3 +530,57 @@ actually resembles. Both are unmeasured.
 **Also delivered:** `Tokenizer::Words` now exposes `unigram_weight`, so fractional bigram votes are
 reachable (unigrams 10 / bigrams 1 = a tenth of a vote). Previously the knob was integer-only with
 unigrams pinned at 1, so no ratio between 0 and 1 could be expressed at all.
+
+
+---
+
+## EXP-012 — The margin metric: no setting is reliably better
+
+**Repository:** `oag-collisions`
+**Hypothesis.** EXP-011 showed top-1 flips between adjacent settings, so a single corpus cannot
+distinguish a good setting from a lucky one. The margin between the correct variant and the next
+one, averaged over several corpora, should be a magnitude rather than a coin flip -- and should
+separate the settings.
+
+**Procedure.** For each tokenizer setting, build the index and query the original document over 8
+corpora (differing only in the replacement tokens drawn). Measure `variant-1 shared bits - best
+other shared bits`. Also count corpora where variant-1 never reached the collision threshold at
+all -- a different and worse failure than losing a ranking, which the top-1 metric reported as a
+plain "no".
+
+**Result (RUN, `057be25`+).** 200 tokens, 60 graded variants, 8 corpora:
+
+| unigram | bigram | ratio | mean margin | std dev | positive | invisible |
+|---|---|---|---|---|---|---|
+| 1 | 0 | 0.00 | 5.7 | 15.3 | 2/6 | 2 |
+| 1 | 1 | 1.00 | 6.0 | 28.0 | 3/8 | 0 |
+| 1 | 2 | 2.00 | 1.0 | 0.0 | 1/1 | 7 |
+| 1 | 4 | 4.00 | -- | -- | 0/8 | 8 |
+| 2 | 1 | 0.50 | 0.0 | 0.0 | 0/2 | 6 |
+| 1 | 3 | 3.00 | -- | -- | 0/8 | 8 |
+
+**Conclusion.** **No tokenizer setting is reliably better than any other.** The mean margins are
+1-6 bits against standard deviations of 15-28 -- every setting is indistinguishable from zero
+within noise, and the number of corpora where the correct variant is *invisible* (below the
+collision threshold, not merely outranked) ranges from 0 to 8 out of 8.
+
+This retires the parameter-tuning line rather than resolving it:
+
+- EXP-010's "weight 2 improves both sensitivities" and EXP-011's "the optimum is somewhere between
+  1 and 4" were both readings of a metric too knife-edge to support them. The margin metric shows
+  the settings are within noise of each other.
+- **The dominant failure is not ranking but visibility.** In most corpora the correct variant does
+  not reach the collision threshold at all, so there is nothing to rank. That is consistent with
+  the EXP-007 sensitivity surface: at 200 units a 2-token edit moves ~1.5 bits on average, which
+  is frequently zero -- the correct variant is invisible because the edit is below the hash's
+  resolution, not because a competing variant outranked it.
+
+**What this means for the layer.** The unit count -- the document's token length -- is the binding
+constraint, not the tokenizer choice. At these sizes the layer cannot reliably rank near-duplicates
+at all, and tuning the tokenizer cannot fix that: every setting fails for the same reason.
+
+**Follow-up (PLANNED).** Repeat the margin measurement at document sizes where the sensitivity
+surface says a 2-token edit is comfortably visible (50-100 units, ~4-6 bits), and see whether the
+tokenizer settings separate there. If they do not separate even in the resolvable band, the
+tokenizer choice is genuinely not the lever and the layer's usefulness is bounded by document
+length.
