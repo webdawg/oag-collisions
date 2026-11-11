@@ -17,7 +17,7 @@ fn document(units: usize) -> Vec<String> {
 
 fn hash_of(tokenizer: Tokenizer, text: &str) -> u64 {
     let units = tokenizer.tokenize(text);
-    let refs: Vec<&str> = units.iter().map(String::as_str).collect();
+    let refs: Vec<&str> = units.iter().map(|(unit, _)| unit.as_str()).collect();
     simhash(&refs)
 }
 
@@ -53,11 +53,11 @@ fn main() {
         ("swap 2 adjacent", &swapped),
     ] {
         let text = variant.join(" ");
-        let unigram = (hash_of(Tokenizer::Words { shingle: 1 }, &base_text)
-            ^ hash_of(Tokenizer::Words { shingle: 1 }, &text))
+        let unigram = (hash_of(Tokenizer::Words { shingle: 1, unigram_weight: 1, bigram_weight: 0 }, &base_text)
+            ^ hash_of(Tokenizer::Words { shingle: 1, unigram_weight: 1, bigram_weight: 0 }, &text))
         .count_ones();
-        let bigram = (hash_of(Tokenizer::Words { shingle: 2 }, &base_text)
-            ^ hash_of(Tokenizer::Words { shingle: 2 }, &text))
+        let bigram = (hash_of(Tokenizer::Words { shingle: 2, unigram_weight: 1, bigram_weight: 1 }, &base_text)
+            ^ hash_of(Tokenizer::Words { shingle: 2, unigram_weight: 1, bigram_weight: 1 }, &text))
         .count_ones();
         println!("{label:>22} {unigram:>18} {bigram:>18}");
     }

@@ -48,7 +48,7 @@ fn main() {
     println!("========================================================================");
     println!("{:>8} {:>16} {:>18} {:>16}", "weight", "reversal bits", "substitute 2 bits", "units");
     for weight in [0_i32, 1, 2, 4] {
-        let tokenizer = Tokenizer::Words { shingle: 2, bigram_weight: weight };
+        let tokenizer = Tokenizer::Words { shingle: 2, unigram_weight: 1, bigram_weight: weight };
         let units = tokenizer.tokenize(&document(200).join(" ")).len();
 
         let base = document(200);
@@ -95,6 +95,77 @@ fn main() {
     println!("making order visible -- and the unit count shows why that is hard: every bigram adds");
     println!("a unit, and units are what freeze the vote.");
 
+    // Finer sweep between weights 1 and 4. The vote weights are integers, so a fractional bigram
+    // vote is expressed by scaling the unigrams: unigrams 10 / bigrams 1 is a tenth of a vote.
+    // EXP-010 located the optimum somewhere between 1 and 4; this resolves where.
+    println!();
+    println!("fine sweep: bigram vote as a fraction of a unigram vote");
+    println!("=======================================================");
+    println!(
+        "{:>10} {:>8} {:>16} {:>18} {:>14} {:>14}",
+        "unigram", "bigram", "ratio", "reversal bits", "substitute bits", "top-1 @200"
+    );
+    for (unigram, bigram) in [
+        (1_i32, 0_i32),
+        (10, 1),
+        (5, 1),
+        (4, 1),
+        (2, 1),
+        (1, 1),
+        (1, 2),
+        (1, 3),
+        (1, 4),
+    ] {
+        let tokenizer = Tokenizer::Words { shingle: 2, unigram_weight: unigram, bigram_weight: bigram };
+        let base_units = tokenizer.tokenize(&document(200).join(" "));
+        let base_refs: Vec<(&str, i32)> =
+            base_units.iter().map(|(unit, w)| (unit.as_str(), *w)).collect();
+
+        let mut reversed = document(200);
+        reversed.reverse();
+        let rev_units = tokenizer.tokenize(&reversed.join(" "));
+        let rev_refs: Vec<(&str, i32)> =
+            rev_units.iter().map(|(unit, w)| (unit.as_str(), *w)).collect();
+        let order_bits = (simhash_weighted(&base_refs) ^ simhash_weighted(&rev_refs)).count_ones();
+
+        let mut changed = document(200);
+        let mut rng = Lcg(0x5EED);
+        for slot in changed.iter_mut().take(2) {
+            *slot = format!("x{}", rng.next() % 1_000_000);
+        }
+        let sub_units = tokenizer.tokenize(&changed.join(" "));
+        let sub_refs: Vec<(&str, i32)> =
+            sub_units.iter().map(|(unit, w)| (unit.as_str(), *w)).collect();
+        let sub_bits = (simhash_weighted(&base_refs) ^ simhash_weighted(&sub_refs)).count_ones();
+
+        let ratio = if unigram == 0 { 0.0 } else { bigram as f64 / unigram as f64 };
+        let mut index = CollisionIndex::with_tokenizer(10_000, HASH_BITS, tokenizer);
+        let variants = 60;
+        let base = document(200);
+        let mut rng2 = Lcg(0x5EED);
+        for v in 1..variants {
+            let mut variant = base.clone();
+            for slot in variant.iter_mut().take(v * 2) {
+                *slot = format!("x{}", rng2.next() % 1_000_000);
+            }
+            index.insert_text(&format!("variant-{v}"), &variant.join(" "));
+        }
+        let top1 = index
+            .collide_text(&base.join(" "))
+            .first()
+            .map(|c| c.id == "variant-1")
+            .unwrap_or(false);
+        println!(
+            "{:>10} {:>8} {:>16} {:>18} {:>18.1} {:>14}",
+            unigram,
+            bigram,
+            format!("{ratio:.2}"),
+            order_bits,
+            sub_bits as f64,
+            if top1 { "yes" } else { "NO" }
+        );
+    }
+
     // Does the improved substitution sensitivity actually fix the *ranking*? Bits moved is not
     // the same as rank-1 correct, and EXP-005's ranking result was measured at weight 1 -- the
     // one setting that makes both worse.
@@ -107,7 +178,7 @@ fn main() {
             let mut index = CollisionIndex::with_tokenizer(
                 10_000,
                 HASH_BITS,
-                Tokenizer::Words { shingle: 2, bigram_weight: weight },
+                Tokenizer::Words { shingle: 2, unigram_weight: 1, bigram_weight: weight },
             );
             let variants = 60.min(units / 4 + 1);
             let base: Vec<String> = (0..units).map(|i| format!("w{i}")).collect();

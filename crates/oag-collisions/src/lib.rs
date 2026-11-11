@@ -78,17 +78,22 @@ pub enum Tokenizer {
     /// Lowercased alphanumeric word tokens, optionally expanded with word n-grams (see
     /// [`shingles`]). This is the default.
     ///
-    /// `bigram_weight` scales the vote each bigram contributes relative to a unigram's 1, so
-    /// `0` is plain unigrams, `1` is unigrams and bigrams voting equally, and a fraction lets
-    /// order register without letting it dominate. See [`simhash_weighted`].
-    Words { shingle: usize, bigram_weight: i32 },
+    /// `bigram_weight` scales the vote each bigram contributes relative to a unigram's
+    /// `unigram_weight`, so `0` is plain unigrams, `1` with `unigram_weight` 1 is unigrams and
+    /// bigrams voting equally, and a fraction lets order register without letting it dominate.
+    /// See [`simhash_weighted`].
+    ///
+    /// Both weights are integers, so a *fractional* bigram vote is expressed by scaling the
+    /// unigrams up: unigrams 10 and bigrams 1 gives bigrams a tenth of a vote. The default is
+    /// unigrams 1, bigrams 0 -- bigrams off entirely.
+    Words { shingle: usize, unigram_weight: i32, bigram_weight: i32 },
     /// Overlapping character n-grams of the raw text, case-preserving. `n` is clamped to at least 1.
     Characters { n: usize },
 }
 
 impl Default for Tokenizer {
     fn default() -> Self {
-        Tokenizer::Words { shingle: 1, bigram_weight: 0 }
+        Tokenizer::Words { shingle: 1, unigram_weight: 1, bigram_weight: 0 }
     }
 }
 
@@ -100,10 +105,11 @@ impl Tokenizer {
     /// letting it dominate. See [`simhash_weighted`].
     pub fn tokenize(&self, text: &str) -> Vec<(String, i32)> {
         match self {
-            Tokenizer::Words { shingle, bigram_weight } => {
+            Tokenizer::Words { shingle, unigram_weight, bigram_weight } => {
                 let tokens = tokenize(text);
+                let unigram_weight = (*unigram_weight).max(1);
                 let mut units: Vec<(String, i32)> =
-                    tokens.iter().cloned().map(|t| (t, 1)).collect();
+                    tokens.iter().cloned().map(|t| (t, unigram_weight)).collect();
                 if *shingle >= 2 && *bigram_weight != 0 {
                     for n in 2..=*shingle {
                         if tokens.len() < n {
@@ -125,11 +131,15 @@ impl Tokenizer {
     /// A short name for reporting.
     pub fn describe(&self) -> String {
         match self {
-            Tokenizer::Words { shingle, bigram_weight } if *shingle == 1 || *bigram_weight == 0 => {
+            Tokenizer::Words { shingle, unigram_weight, bigram_weight }
+                if *shingle == 1 || *bigram_weight == 0 =>
+            {
                 format!("word unigrams (bigrams off)")
             }
-            Tokenizer::Words { shingle, bigram_weight } => {
-                format!("word unigrams + {shingle}-grams at weight {bigram_weight}")
+            Tokenizer::Words { shingle, unigram_weight, bigram_weight } => {
+                format!(
+                    "word unigrams at weight {unigram_weight} + {shingle}-grams at weight {bigram_weight}"
+                )
             }
             Tokenizer::Characters { n } => format!("character {n}-grams"),
         }
@@ -288,7 +298,11 @@ impl CollisionIndex {
     /// `shingle = 2` hashes unigrams and word bigrams together, which is the measured fix to try
     /// for short documents -- see [`shingles`].
     pub fn with_capacity_levels_and_shingle(max_items: usize, prefix_levels: u32, shingle: usize) -> Self {
-        Self::with_tokenizer(max_items, prefix_levels, Tokenizer::Words { shingle, bigram_weight: 1 })
+        Self::with_tokenizer(
+            max_items,
+            prefix_levels,
+            Tokenizer::Words { shingle, unigram_weight: 1, bigram_weight: 1 },
+        )
     }
 
     /// As [`Self::with_capacity_and_levels`], with an explicit tokenizer.
@@ -477,7 +491,7 @@ mod tests {
         let mut unigram = CollisionIndex::with_tokenizer(
             100,
             HASH_BITS,
-            Tokenizer::Words { shingle: 1, bigram_weight: 0 },
+            Tokenizer::Words { shingle: 1, unigram_weight: 1, bigram_weight: 0 },
         );
         unigram.insert_text("doc", text);
         assert_eq!(
@@ -494,7 +508,7 @@ mod tests {
         let mut bigram = CollisionIndex::with_tokenizer(
             100,
             HASH_BITS,
-            Tokenizer::Words { shingle: 2, bigram_weight: 1 },
+            Tokenizer::Words { shingle: 2, unigram_weight: 1, bigram_weight: 1 },
         );
         bigram.insert_text("doc", text);
         assert_eq!(

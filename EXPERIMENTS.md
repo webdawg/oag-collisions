@@ -476,7 +476,57 @@ paraphrase rather than substitution could move it.
 worst setting. That default is now known to be a bad one and should be revisited; the *tokenizer*
 default (bigrams off, weight 0) is unaffected and remains the conservative choice.
 
-**Follow-up (PLANNED).** Sweep `bigram_weight` from 1 to 4 in finer steps using scaled unigram
-weights, since the knob is `i32` and therefore integer-only -- a fractional bigram vote is currently
-only reachable by scaling the unigrams up (e.g. unigrams 10, bigrams 1), which the tokenizer does
-not expose.
+**Follow-up:** superseded by EXP-011, which ran it after exposing `unigram_weight`.
+
+---
+
+## EXP-011 — Fine sweep: the ranking is not a smooth function of the vote ratio
+
+**Repository:** `oag-collisions`
+**Hypothesis.** EXP-010 located a bigram-weight optimum somewhere between 1 and 4. Since the vote
+weights are integers, a fractional bigram vote requires scaling the unigrams up -- so
+`Tokenizer::Words` gained an explicit `unigram_weight` (default 1, bigrams off), letting the sweep
+run at ratios from 0 to 4.
+
+**Result (RUN, `91534a3`+).** 200 tokens; substitution = 2 tokens replaced; ranking = top-1 among
+60 graded variants.
+
+| unigram | bigram | ratio | reversal bits | substitution bits | top-1 @200 |
+|---|---|---|---|---|---|
+| 1 | 0 | 0.00 | 0 | 1.0 | yes |
+| 10 | 1 | 0.10 | 2 | 3.0 | NO |
+| 5 | 1 | 0.20 | 4 | 3.0 | NO |
+| 4 | 1 | 0.25 | 8 | 4.0 | NO |
+| 2 | 1 | 0.50 | 15 | 4.0 | NO |
+| 1 | 1 | 1.00 | 24 | 1.0 | NO |
+| 1 | 2 | 2.00 | 31 | 4.0 | yes |
+| 1 | 3 | 3.00 | 31 | 3.0 | NO |
+| 1 | 4 | 4.00 | 33 | 5.0 | NO |
+
+**What is smooth and what is not.**
+- **Order sensitivity is smooth and monotone**: reversal bits rise steadily from 0 at ratio 0 to 33
+  at ratio 4. More bigram vote gives more order signal, as expected.
+- **Substitution sensitivity is not monotone**: 1.0, 3.0, 3.0, 4.0, 4.0, **1.0**, 4.0, 3.0, 5.0.
+  It dips at ratios 0 and 1.00 and is otherwise flat around 3-5. There is no clean story here, and
+  the dip at exactly 1.00 -- where unigrams and bigrams vote equally -- is recorded as an
+  observation, not explained.
+- **The ranking is not a function of the ratio at all, in any useful sense.** Top-1 is "yes" at
+  ratios 0.00 and 2.00 and "no" at 0.10, 0.20, 0.25, 0.50, 1.00, 3.00 and 4.00. Two neighbouring
+  settings nine-tenths of the way apart behave differently, and the failures are not clustered at
+  either extreme.
+
+**Conclusion: EXP-010's "weight 2 is the measured optimum" overstates the smoothness.** The
+sensitivity measurements are real and the 60-token improvement at weight 2 stands, but the
+*ranking* outcome flips between adjacent settings, so the top-1 task is a coin flip across the
+parameter range rather than a curve with a peak. Picking a vote ratio by measuring top-1 on one
+corpus is not a reliable method -- a setting that wins on this corpus can lose 0.1 away.
+
+**What this means for the layer.** The knobs are real and the sensitivities respond to them, but
+the top-1 ranking metric is too brittle to tune against. Either the ranking task needs to be
+replaced with something less knife-edge (mean rank over several corpora, or a threshold on shared
+bits rather than an exact top-1), or the parameters need to be chosen on a corpus the deployment
+actually resembles. Both are unmeasured.
+
+**Also delivered:** `Tokenizer::Words` now exposes `unigram_weight`, so fractional bigram votes are
+reachable (unigrams 10 / bigrams 1 = a tenth of a vote). Previously the knob was integer-only with
+unigrams pinned at 1, so no ratio between 0 and 1 could be expressed at all.

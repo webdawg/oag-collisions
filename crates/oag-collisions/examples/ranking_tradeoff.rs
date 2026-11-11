@@ -181,8 +181,8 @@ fn main() {
     println!("===================================================");
     println!("{:>8} {:>14} {:>14} {:>14}", "tokens", "unigram top-1", "bigram top-1", "bigram tie");
     for words in [200_usize, 60, 20, 8] {
-        let unigram = measure_with_tokenizer(words, variants, HASH_BITS, Tokenizer::Words { shingle: 1, bigram_weight: 0 });
-        let bigram = measure_with_tokenizer(words, variants, HASH_BITS, Tokenizer::Words { shingle: 2, bigram_weight: 1 });
+        let unigram = measure_with_tokenizer(words, variants, HASH_BITS, Tokenizer::Words { shingle: 1, unigram_weight: 1, bigram_weight: 0 });
+        let bigram = measure_with_tokenizer(words, variants, HASH_BITS, Tokenizer::Words { shingle: 2, unigram_weight: 1, bigram_weight: 1 });
         println!(
             "{:>8} {:>14} {:>14} {:>14}",
             words,
@@ -219,7 +219,7 @@ fn main() {
     for words in [200_usize, 60, 20, 8] {
         let mut row = format!("{words:>8}");
         for tokenizer in [
-            Tokenizer::Words { shingle: 1, bigram_weight: 0 },
+            Tokenizer::Words { shingle: 1, unigram_weight: 1, bigram_weight: 0 },
             Tokenizer::Characters { n: 3 },
             Tokenizer::Characters { n: 5 },
         ] {
