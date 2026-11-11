@@ -11,6 +11,9 @@
 //! everything already indexed, and the longest shared prefix ranks the result. No vector
 //! database, no embedding model, no training -- one deterministic function and a `HashMap`.
 //!
+//! The index is bounded, not least because each item costs 64 map entries: see
+//! [`DEFAULT_MAX_ITEMS`] for why the item count is not the number to reason about.
+//!
 //! This is deliberately the smallest honest instance of the idea. It is a new inference mechanism
 //! for the project to build on, not a finished product.
 //!
@@ -26,6 +29,16 @@ use std::collections::HashMap;
 /// Hash width in bits. 64 keeps the prefix ladder manageable (64 index entries per item) while
 /// giving a useful similarity gradient.
 pub const HASH_BITS: u32 = 64;
+
+/// Default cap on how many items a `CollisionIndex` holds.
+///
+/// The bound that matters is not the item count but the bucket count: every item is stored under
+/// all 64 prefixes of its hash, so memory is `O(items * 64)` map entries. At the default of
+/// 100,000 items that is 6.4 million entries -- already the difference between "a similarity
+/// index" and "most of the RAM on a small box". Without a cap, indexing a graph's worth of nodes
+/// would grow without limit, which is the same defect the imagination layer's dream log had before
+/// it was bounded.
+pub const DEFAULT_MAX_ITEMS: usize = 100_000;
 
 /// The minimum shared prefix for two items to count as a collision at all.
 ///
@@ -93,12 +106,22 @@ pub struct Collision<'a> {
 /// That is what makes partial collisions findable: instead of asking "does this exact hash
 /// exist", a query asks "what shares my first N bits", for every N. Storage is `O(items * 64)`
 /// small integers -- cheap enough that bounding it is not worth the complexity today.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct CollisionIndex {
     /// `(prefix_length, prefix)` -> item ids stored under it.
     buckets: HashMap<(u32, u64), Vec<String>>,
     /// Item id -> its full hash, so re-indexing or removal stays possible.
     hashes: HashMap<String, u64>,
+    /// Insertion order, oldest first, so a full index can evict deterministically.
+    order: std::collections::VecDeque<String>,
+    /// How many items the index will hold before evicting the oldest.
+    max_items: usize,
+}
+
+impl Default for CollisionIndex {
+    fn default() -> Self {
+        Self::with_capacity(DEFAULT_MAX_ITEMS)
+    }
 }
 
 impl CollisionIndex {
@@ -106,31 +129,71 @@ impl CollisionIndex {
         Self::default()
     }
 
+    /// An index that holds at most `max_items` items, evicting the oldest when full.
+    ///
+    /// `0` means unbounded and is deliberately not offered as a default: an unbounded collision
+    /// index is a memory-exhaustion vector, and the caller should have to ask for it.
+    pub fn with_capacity(max_items: usize) -> Self {
+        Self {
+            buckets: HashMap::new(),
+            hashes: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+            max_items,
+        }
+    }
+
+    /// How many items this index will hold before evicting.
+    pub fn capacity(&self) -> usize {
+        self.max_items
+    }
+
     /// Indexes `id` under every prefix of the SimHash of `tokens`.
     ///
     /// Re-indexing an existing id replaces it rather than duplicating: a collision index that
     /// counts the same item twice would inflate every result it appears in.
-    pub fn insert(&mut self, id: &str, tokens: &[&str]) {
+    ///
+    /// Returns `true` if an older item was evicted to make room. Eviction is oldest-first, which is
+    /// the honest default for an index with no usage statistics: recency is not the same as
+    /// relevance, and pretending otherwise would need a hit counter this layer does not have yet.
+    pub fn insert(&mut self, id: &str, tokens: &[&str]) -> bool {
         self.remove(id);
         let hash = simhash(tokens);
         self.hashes.insert(id.to_string(), hash);
+        self.order.push_back(id.to_string());
         for length in 1..=HASH_BITS {
             let prefix = hash >> (HASH_BITS - length);
             self.buckets.entry((length, prefix)).or_default().push(id.to_string());
         }
+        self.enforce_capacity()
+    }
+
+    /// Evicts the oldest items until the index is within its capacity.
+    fn enforce_capacity(&mut self) -> bool {
+        if self.max_items == 0 {
+            return false;
+        }
+        let mut evicted = false;
+        while self.hashes.len() > self.max_items {
+            let Some(oldest) = self.order.pop_front() else { break };
+            // `remove` takes `&str`; the id is owned here, so borrow it for the call.
+            self.remove(&oldest);
+            evicted = true;
+        }
+        evicted
     }
 
     /// Convenience for free text: tokenizes then inserts.
-    pub fn insert_text(&mut self, id: &str, text: &str) {
+    pub fn insert_text(&mut self, id: &str, text: &str) -> bool {
         let tokens = tokenize(text);
         let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
-        self.insert(id, &refs);
+        self.insert(id, &refs)
     }
 
     /// Removes `id` from every bucket. Missing ids are a no-op, so a caller can prune without
     /// checking first.
     pub fn remove(&mut self, id: &str) {
         let Some(hash) = self.hashes.remove(id) else { return };
+        self.order.retain(|existing| existing != id);
         for length in 1..=HASH_BITS {
             let prefix = hash >> (HASH_BITS - length);
             if let Some(bucket) = self.buckets.get_mut(&(length, prefix)) {
@@ -277,6 +340,53 @@ mod tests {
         index.remove("a");
         assert!(index.is_empty());
         assert!(index.collide_text("rust async runtime").is_empty());
+    }
+
+    /// The defect this guards: an unbounded index is a memory-exhaustion vector, and each item
+    /// costs 64 bucket entries, so the item count alone is not the number to reason about.
+    #[test]
+    fn a_full_index_evicts_the_oldest_item() {
+        let mut index = CollisionIndex::with_capacity(2);
+        assert_eq!(index.capacity(), 2);
+        index.insert_text("oldest", "alpha beta gamma delta epsilon zeta eta theta");
+        index.insert_text("middle", "iota kappa lambda mu nu xi omicron pi rho");
+        assert_eq!(index.len(), 2);
+
+        // Inserting a third evicts the oldest, not the newest.
+        let evicted = index.insert_text("newest", "sigma tau upsilon phi chi psi omega sigma");
+        assert!(evicted, "inserting past capacity must report the eviction");
+        assert_eq!(index.len(), 2);
+        assert!(
+            index.collide_text("alpha beta gamma delta epsilon zeta eta theta").is_empty(),
+            "the evicted item must no longer collide"
+        );
+        assert_eq!(index.collide_text("sigma tau upsilon phi chi psi omega sigma")[0].id, "newest");
+        assert_eq!(index.collide_text("iota kappa lambda mu nu xi omicron pi rho")[0].id, "middle");
+    }
+
+    /// Re-indexing an item at capacity must not evict a *different* item: replacing an existing
+    /// entry is not an insertion.
+    #[test]
+    fn re_indexing_at_capacity_does_not_evict_anything() {
+        let mut index = CollisionIndex::with_capacity(2);
+        index.insert_text("a", "alpha beta gamma delta epsilon zeta eta theta iota");
+        index.insert_text("b", "kappa lambda mu nu xi omicron pi rho sigma tau");
+        assert!(!index.insert_text("a", "upsilon phi chi psi omega sigma tau upsilon phi"));
+        assert_eq!(index.len(), 2, "replacing an entry must not evict its neighbour");
+        assert_eq!(index.collide_text("kappa lambda mu nu xi omicron pi rho sigma tau")[0].id, "b");
+    }
+
+    /// Eviction must clear every one of the item's 64 bucket entries, not just the hash record --
+    /// otherwise the index would leak memory one stale entry at a time and still return ghosts.
+    #[test]
+    fn eviction_clears_every_bucket_entry() {
+        let mut index = CollisionIndex::with_capacity(1);
+        index.insert_text("a", "alpha beta gamma delta epsilon zeta eta theta iota kappa");
+        index.insert_text("b", "lambda mu nu xi omicron pi rho sigma tau upsilon phi");
+        assert_eq!(index.len(), 1);
+        assert_eq!(index.collide_text("lambda mu nu xi omicron pi rho sigma tau upsilon phi")[0].id, "b");
+        // Nothing from "a" survives at any prefix length.
+        assert!(index.collide_text("alpha beta gamma delta epsilon zeta eta theta iota kappa").is_empty());
     }
 
     #[test]
