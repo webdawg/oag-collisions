@@ -77,32 +77,61 @@ pub fn shingles(tokens: &[String], max_n: usize) -> Vec<String> {
 pub enum Tokenizer {
     /// Lowercased alphanumeric word tokens, optionally expanded with word n-grams (see
     /// [`shingles`]). This is the default.
-    Words { shingle: usize },
+    ///
+    /// `bigram_weight` scales the vote each bigram contributes relative to a unigram's 1, so
+    /// `0` is plain unigrams, `1` is unigrams and bigrams voting equally, and a fraction lets
+    /// order register without letting it dominate. See [`simhash_weighted`].
+    Words { shingle: usize, bigram_weight: i32 },
     /// Overlapping character n-grams of the raw text, case-preserving. `n` is clamped to at least 1.
     Characters { n: usize },
 }
 
 impl Default for Tokenizer {
     fn default() -> Self {
-        Tokenizer::Words { shingle: 1 }
+        Tokenizer::Words { shingle: 1, bigram_weight: 0 }
     }
 }
 
 impl Tokenizer {
-    /// Produces the units to hash for `text`.
-    pub fn tokenize(&self, text: &str) -> Vec<String> {
+    /// Produces the units to hash for `text`, each with its vote weight.
+    ///
+    /// A unigram weighs 1. A bigram weighs `bigram_weight`, so `0` switches bigrams off and a
+    /// fraction gives them a fraction of a vote -- the knob that lets order register without
+    /// letting it dominate. See [`simhash_weighted`].
+    pub fn tokenize(&self, text: &str) -> Vec<(String, i32)> {
         match self {
-            Tokenizer::Words { shingle } => shingles(&tokenize(text), *shingle),
-            Tokenizer::Characters { n } => char_shingles(text, *n),
+            Tokenizer::Words { shingle, bigram_weight } => {
+                let tokens = tokenize(text);
+                let mut units: Vec<(String, i32)> =
+                    tokens.iter().cloned().map(|t| (t, 1)).collect();
+                if *shingle >= 2 && *bigram_weight != 0 {
+                    for n in 2..=*shingle {
+                        if tokens.len() < n {
+                            break;
+                        }
+                        for window in tokens.windows(n) {
+                            units.push((window.join(" "), *bigram_weight));
+                        }
+                    }
+                }
+                units
+            }
+            Tokenizer::Characters { n } => {
+                char_shingles(text, *n).into_iter().map(|unit| (unit, 1)).collect()
+            }
         }
     }
 
     /// A short name for reporting.
-    pub fn describe(&self) -> &'static str {
+    pub fn describe(&self) -> String {
         match self {
-            Tokenizer::Words { shingle: 1 } => "word unigrams",
-            Tokenizer::Words { .. } => "word n-grams",
-            Tokenizer::Characters { .. } => "character n-grams",
+            Tokenizer::Words { shingle, bigram_weight } if *shingle == 1 || *bigram_weight == 0 => {
+                format!("word unigrams (bigrams off)")
+            }
+            Tokenizer::Words { shingle, bigram_weight } => {
+                format!("word unigrams + {shingle}-grams at weight {bigram_weight}")
+            }
+            Tokenizer::Characters { n } => format!("character {n}-grams"),
         }
     }
 }
@@ -134,13 +163,31 @@ pub const MIN_COLLISION_BITS: u32 = 8;
 /// take the majority. Similar token sets move the majority on few positions, so their SimHashes
 /// share a long prefix. Deterministic and dependency-free beyond `blake3`.
 pub fn simhash(tokens: &[&str]) -> u64 {
+    let weighted: Vec<(&str, i32)> = tokens.iter().map(|token| (*token, 1)).collect();
+    simhash_weighted(&weighted)
+}
+
+/// SimHash with a per-unit vote weight.
+///
+/// The unweighted scheme gives every unit one vote, which forces a choice between two failures
+/// (measured in `EXPERIMENTS.md`): unigrams are exactly blind to word order, and bigrams -- which
+/// double the unit count -- freeze the hash against substitution. Weighting is the standard
+/// escape from that either/or: unigrams keep weight 1 and bigrams are given a fraction of a vote,
+/// so order contributes to the hash without dominating it.
+///
+/// A weight of 0 removes a unit from the vote entirely; negative weights are accepted and simply
+/// vote the other way, which is useful for down-weighting a known-noise unit.
+pub fn simhash_weighted(units: &[(&str, i32)]) -> u64 {
     let mut weights = [0i32; HASH_BITS as usize];
-    for token in tokens {
+    for (token, weight) in units {
+        if *weight == 0 {
+            continue;
+        }
         let digest = blake3::hash(token.as_bytes());
         let bits = u64::from_le_bytes(digest.as_bytes()[..8].try_into().unwrap());
-        for (position, weight) in weights.iter_mut().enumerate() {
+        for (position, slot) in weights.iter_mut().enumerate() {
             let bit = (bits >> position) & 1;
-            *weight += if bit == 1 { 1 } else { -1 };
+            *slot += if bit == 1 { *weight } else { -*weight };
         }
     }
     let mut hash = 0u64;
@@ -241,7 +288,7 @@ impl CollisionIndex {
     /// `shingle = 2` hashes unigrams and word bigrams together, which is the measured fix to try
     /// for short documents -- see [`shingles`].
     pub fn with_capacity_levels_and_shingle(max_items: usize, prefix_levels: u32, shingle: usize) -> Self {
-        Self::with_tokenizer(max_items, prefix_levels, Tokenizer::Words { shingle })
+        Self::with_tokenizer(max_items, prefix_levels, Tokenizer::Words { shingle, bigram_weight: 1 })
     }
 
     /// As [`Self::with_capacity_and_levels`], with an explicit tokenizer.
@@ -286,8 +333,22 @@ impl CollisionIndex {
     /// the honest default for an index with no usage statistics: recency is not the same as
     /// relevance, and pretending otherwise would need a hit counter this layer does not have yet.
     pub fn insert(&mut self, id: &str, tokens: &[&str]) -> bool {
+        let units: Vec<(String, i32)> = tokens.iter().map(|token| (token.to_string(), 1)).collect();
+        self.insert_units(id, &units)
+    }
+
+    /// Indexes `id` from units carrying explicit vote weights -- the path a tokenizer with a
+    /// non-unit `bigram_weight` takes. See [`simhash_weighted`].
+    ///
+    /// This is a separate method from [`Self::insert`] rather than a flag on it because the two
+    /// have different callers: `insert` is the raw-token escape hatch, `insert_units` is what text
+    /// goes through.
+    pub fn insert_units(&mut self, id: &str, units: &[(String, i32)]) -> bool {
         self.remove(id);
-        let hash = simhash(tokens);
+        let refs: Vec<&str> = units.iter().map(|(unit, _)| unit.as_str()).collect();
+        let weights: Vec<i32> = units.iter().map(|(_, weight)| *weight).collect();
+        let weighted: Vec<(&str, i32)> = refs.into_iter().zip(weights).collect();
+        let hash = simhash_weighted(&weighted);
         self.hashes.insert(id.to_string(), hash);
         self.order.push_back(id.to_string());
         for length in 1..=self.prefix_levels {
@@ -312,11 +373,17 @@ impl CollisionIndex {
         evicted
     }
 
-    /// Convenience for free text: tokenizes then inserts.
+    /// Convenience for free text: applies **this index's tokenizer**, weights and all, then
+    /// inserts.
+    ///
+    /// This used to call the free `tokenize` function and so ignored the tokenizer entirely --
+    /// meaning an index configured for bigrams or character n-grams indexed unigrams while
+    /// `collide_text` queried with the configured scheme, and every cross-tokenizer comparison was
+    /// between two differently-hashed documents. Fixed and covered by
+    /// `the_index_honours_its_tokenizer_on_both_sides`.
     pub fn insert_text(&mut self, id: &str, text: &str) -> bool {
-        let tokens = tokenize(text);
-        let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
-        self.insert(id, &refs)
+        let units = self.tokenizer.tokenize(text);
+        self.insert_units(id, &units)
     }
 
     /// Removes `id` from every bucket. Missing ids are a no-op, so a caller can prune without
@@ -367,7 +434,7 @@ impl CollisionIndex {
     /// Convenience for free text, expanded with this index's shingle size.
     pub fn collide_text(&self, text: &str) -> Vec<Collision<'_>> {
         let units = self.tokenizer.tokenize(text);
-        let refs: Vec<&str> = units.iter().map(String::as_str).collect();
+        let refs: Vec<&str> = units.iter().map(|(unit, _)| unit.as_str()).collect();
         self.collide(&refs)
     }
 
@@ -394,6 +461,53 @@ impl CollisionIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test for a real defect: `insert_text` used the free `tokenize` function and so
+    /// ignored the index's tokenizer, while `collide_text` honoured it. An index configured for
+    /// bigrams therefore indexed unigrams and queried with bigrams, and every cross-tokenizer
+    /// comparison was between two differently-hashed documents.
+    ///
+    /// The self-collision assertion is the one that catches it: a document must collide with
+    /// itself at full strength under whatever tokenizer the index was configured with.
+    #[test]
+    fn the_index_honours_its_tokenizer_on_both_sides() {
+        let text = "alpha beta gamma delta epsilon zeta eta theta iota kappa";
+        let reordered: String = text.split_whitespace().rev().collect::<Vec<_>>().join(" ");
+
+        let mut unigram = CollisionIndex::with_tokenizer(
+            100,
+            HASH_BITS,
+            Tokenizer::Words { shingle: 1, bigram_weight: 0 },
+        );
+        unigram.insert_text("doc", text);
+        assert_eq!(
+            unigram.collide_text(text).first().map(|c| c.shared_bits),
+            Some(HASH_BITS),
+            "a document must collide with itself at full strength"
+        );
+        // Unigrams are order-invariant, so the reordering also collides at full strength.
+        assert_eq!(
+            unigram.collide_text(&reordered).first().map(|c| c.shared_bits),
+            Some(HASH_BITS)
+        );
+
+        let mut bigram = CollisionIndex::with_tokenizer(
+            100,
+            HASH_BITS,
+            Tokenizer::Words { shingle: 2, bigram_weight: 1 },
+        );
+        bigram.insert_text("doc", text);
+        assert_eq!(
+            bigram.collide_text(text).first().map(|c| c.shared_bits),
+            Some(HASH_BITS),
+            "a bigram index must also collide with itself at full strength"
+        );
+        // But bigrams *detect* the reordering, which is the whole reason to configure them.
+        assert!(
+            bigram.collide_text(&reordered).first().map(|c| c.shared_bits).unwrap_or(0) < HASH_BITS,
+            "bigrams must detect a reordering"
+        );
+    }
 
     /// EXP-008: unigram SimHash is *exactly* invariant to token order, because the majority vote
     /// sums each token once and a permutation does not change a sum. This is a structural property

@@ -146,6 +146,13 @@ problem, this should move it; if it is a signal problem, nothing will. Measured,
 
 ## EXP-005 — Does bigram shingling fix the short-document failure?
 
+> **CORRECTED (`a5b69bc`+): this experiment's tokenizer comparison was invalid.**
+> `insert_text` called the free `tokenize` function and so ignored the index's tokenizer, while
+> `collide_text` honoured it. Every cross-tokenizer measurement below therefore compared a
+> **unigram-indexed** document against a **bigram-indexed** query -- two differently-hashed
+> documents. The "bigrams degrade the working case" result was an artifact of that mismatch, not a
+> property of bigrams. See EXP-009 for the defect, the fix, and the corrected numbers.
+
 **Repository:** `oag-collisions`
 **Hypothesis.** The short-document failure is a token-count problem: unigram SimHash is a majority
 vote over bit positions, and with few tokens the vote is decided by noise. Shingling (unigrams plus
@@ -365,3 +372,48 @@ that reliably once documents grow past the unit count its ranking window allows.
 attempting to keep substitution sensitivity while recovering order sensitivity. Whether the
 bigrams' vote weight can be made small enough not to freeze the hash is the open question -- and it
 would be measured on the EXP-007 surface, not assumed.
+
+
+---
+
+## EXP-009 — `insert_text` ignored the index's tokenizer
+
+**Repository:** `oag-collisions`
+**Defect.** `CollisionIndex::insert_text` called the free `tokenize` function -- word unigrams,
+weight 1 -- while `collide_text` called `self.tokenizer.tokenize`. An index configured for word
+bigrams or character n-grams therefore **indexed unigrams and queried with the configured scheme**.
+Every cross-tokenizer comparison was between two differently-hashed documents.
+
+**How it was found.** Chasing why character trigrams produced *zero* collision signal: the query's
+and a variant's trigram hashes were identical (885 of 887 units shared), yet the index reported
+nothing. That is impossible for a matching pair, so the index was suspected rather than the hash.
+
+**Fix.** `Tokenizer::tokenize` now returns `(String, i32)` units -- text and vote weight -- and a new
+`insert_units` is the single insert path; `insert` wraps raw tokens at weight 1 and `insert_text`
+goes through the tokenizer. Added `simhash_weighted`, the standard weighted SimHash, because the
+either/or the defect exposed (unigrams blind to order, bigrams freezing substitution) is really a
+*vote-weight* question: unigrams at weight 1, bigrams at a fraction.
+
+**Test.** `the_index_honours_its_tokenizer_on_both_sides`. **Verified to catch the defect**: with
+`insert_text` temporarily reverted to the free `tokenize`, the test fails on "a bigram index must
+also collide with itself at full strength" and passes again once restored.
+
+**Consequence.** Two experiments are invalidated and marked so in place rather than deleted:
+- **EXP-005** (bigrams) -- the comparison was mismatched; its word-bigram conclusion does not stand
+  as written.
+- **EXP-008**'s character-trigram numbers -- same mismatch. EXP-008's *word* unigram/bigram
+  comparison called `simhash` directly on both sides and is unaffected; the order-invariance result
+  stands.
+
+**What the corrected measurements show.**
+- **Character trigrams freeze the hash completely.** With both sides consistently trigram-hashed,
+  every variant of a 200-token document hashes *identically* -- all 60 collide at 64 shared bits.
+  The earlier "no collisions at all" was the mismatch; the truth is worse and more informative: the
+  vote is frozen, so the index cannot rank at all.
+- **Word bigrams still do not fix short documents** (60 and 200 tokens both fail), but at 200 tokens
+  the top hit is now `variant-2` at 18 shared bits rather than a clean `variant-1` win. Bigrams
+  change *which* variant wins, not just whether one does.
+
+**Follow-up (PLANNED).** Now that the tokenizer is honoured on both sides, re-run the EXP-007
+sensitivity surface per tokenizer. The surface was measured with word unigrams only; bigram and
+character surfaces are unmeasured, and the new `bigram_weight` knob is untested.

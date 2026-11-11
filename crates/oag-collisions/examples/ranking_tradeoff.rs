@@ -181,8 +181,8 @@ fn main() {
     println!("===================================================");
     println!("{:>8} {:>14} {:>14} {:>14}", "tokens", "unigram top-1", "bigram top-1", "bigram tie");
     for words in [200_usize, 60, 20, 8] {
-        let unigram = measure_with_tokenizer(words, variants, HASH_BITS, Tokenizer::Words { shingle: 1 });
-        let bigram = measure_with_tokenizer(words, variants, HASH_BITS, Tokenizer::Words { shingle: 2 });
+        let unigram = measure_with_tokenizer(words, variants, HASH_BITS, Tokenizer::Words { shingle: 1, bigram_weight: 0 });
+        let bigram = measure_with_tokenizer(words, variants, HASH_BITS, Tokenizer::Words { shingle: 2, bigram_weight: 1 });
         println!(
             "{:>8} {:>14} {:>14} {:>14}",
             words,
@@ -219,7 +219,7 @@ fn main() {
     for words in [200_usize, 60, 20, 8] {
         let mut row = format!("{words:>8}");
         for tokenizer in [
-            Tokenizer::Words { shingle: 1 },
+            Tokenizer::Words { shingle: 1, bigram_weight: 0 },
             Tokenizer::Characters { n: 3 },
             Tokenizer::Characters { n: 5 },
         ] {
@@ -246,12 +246,12 @@ fn main() {
     println!("  index reports {} collisions", results.len());
     // Compute every variant's hash directly and compare with the query's.
     let q_units = Tokenizer::Characters { n: 3 }.tokenize(&documents[0].join(" "));
-    let q_refs: Vec<&str> = q_units.iter().map(String::as_str).collect();
+    let q_refs: Vec<&str> = q_units.iter().map(|(unit, _)| unit.as_str()).collect();
     let q_hash = oag_collisions::simhash(&q_refs);
     println!("  query hash:  {q_hash:016x}");
     for position in 1..4 {
         let units = Tokenizer::Characters { n: 3 }.tokenize(&documents[position].join(" "));
-        let refs: Vec<&str> = units.iter().map(String::as_str).collect();
+        let refs: Vec<&str> = units.iter().map(|(unit, _)| unit.as_str()).collect();
         let hash = oag_collisions::simhash(&refs);
         let text = documents[position].join(" ");
         println!(
@@ -278,8 +278,8 @@ fn main() {
     // trigram hashes actually share? If this is low, the index is not the problem.
     let query_units = Tokenizer::Characters { n: 3 }.tokenize(&documents[0].join(" "));
     let variant_units = Tokenizer::Characters { n: 3 }.tokenize(&documents[1].join(" "));
-    let q_refs: Vec<&str> = query_units.iter().map(String::as_str).collect();
-    let v_refs: Vec<&str> = variant_units.iter().map(String::as_str).collect();
+    let q_refs: Vec<&str> = query_units.iter().map(|(unit, _)| unit.as_str()).collect();
+    let v_refs: Vec<&str> = variant_units.iter().map(|(unit, _)| unit.as_str()).collect();
     let q_hash = oag_collisions::simhash(&q_refs);
     let v_hash = oag_collisions::simhash(&v_refs);
     let differing = (q_hash ^ v_hash).count_ones();

@@ -1,0 +1,1 @@
+std::iter::Map<std::slice::Iter<'_, (String, i32)>, for<'a> fn(&'a String) -> &'a str {String::as_str}>
