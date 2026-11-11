@@ -248,3 +248,63 @@ sensitivity of its own unit count rather than assume more is better.
 **Follow-up (PLANNED).** Repeat the sensitivity sweep while varying how much the documents differ,
 to map the window: units on one axis, edit distance on the other, bits-moved as the surface. That
 would turn "the window exists" into "the window is here".
+
+
+---
+
+## EXP-007 — The sensitivity window, mapped
+
+**Repository:** `oag-collisions`
+**Hypothesis.** EXP-006 found that sensitivity falls with unit count but measured it at one edit
+distance. Mapping the whole surface -- units against edit distance -- should turn "a window exists"
+into "the window is here".
+
+**Procedure.** `crates/oag-collisions/examples/sensitivity.rs`. Documents of 10, 20, 50, 100, 200,
+400 and 800 tokens; edits of 1, 2, 4, 8, 16, 32, 64 tokens (capped at half the document); bits of
+the SimHash moved, averaged over 8 deterministic seeds because one draw of replacement tokens is a
+sample rather than a measurement.
+
+**Result (RUN, `3d70ffd`+).**
+
+```
+ units   e=1   e=2   e=4   e=8  e=16  e=32  e=64
+    10  10.5  13.5  18.6  19.5  19.5  19.5  19.5
+    20   7.2   9.8  16.5  19.5  20.6  20.6  20.6
+    50   3.0   4.9   6.6   9.6  13.5  18.8  18.8
+   100   3.6   3.5   5.4   8.5  10.9  17.6  22.4
+   200   1.4   1.5   2.8   3.1   6.6  10.8  13.9
+   400   1.2   1.5   3.9   4.6   5.0  10.0  12.2
+   800   0.5   0.9   1.0   2.2   4.0   5.0   7.8
+```
+
+Three features are worth reading off it:
+
+1. **The ~19.5-bit plateau** in the bottom-right is the distance between *unrelated* documents.
+   Once half the document is replaced, size stops mattering -- that is the noise floor everything
+   is measured against.
+2. **Sensitivity falls with unit count** and does not recover: 800 units moves 0.5 bits for a
+   one-token edit and 7.8 bits for a 64-token edit.
+3. **The ranking gap collapses before detection does.** The gap between e=2 and e=4 is 5.1 bits at
+   10 units, 1.8 at 50, 1.3 at 200, and **0.1 bits at 800**. So at 800 units two near-duplicates
+   at different distances cannot be *ordered* at all, even though both are still far closer than an
+   unrelated document.
+
+**Conclusion.** The window is a **ranking** window, not a detection window. Detection degrades
+gracefully -- even a frozen hash still separates near-duplicates from unrelated documents by ~19
+bits. Ranking near-duplicates *against each other* is what breaks, and it breaks last: the
+e=2 / e=4 gap is the number to watch, not the absolute bits moved.
+
+**The surface also falsifies an explanation.** EXP-004 measured a failure at 60 tokens; here 60
+tokens sits comfortably inside the resolvable band (e=2 moves ~4 bits, e=4 ~6). So the 60-token
+failure has another cause, and EXP-006 already recorded it as unexplained. This surface narrows it
+rather than closing it: whatever fails at 60 tokens is not the majority vote's sensitivity.
+
+**Consequence for the layer.** Choose the unit count by the *ranking* requirement, not the
+detection requirement. If only "is this roughly the same document" matters, a large document is
+fine. If "which of these near-duplicates is closest" matters, the unit count must be small enough
+that consecutive edit distances are separable -- measured at ~200 tokens for e=2 vs e=4, and
+collapse by 800.
+
+**Follow-up (PLANNED).** Repeat with a real corpus rather than synthetic token substitution, since
+real near-duplicates differ by paraphrase and reorder rather than by token replacement -- the
+e=2/e=4 gap is a synthetic proxy for a semantic distance the surface does not model.
