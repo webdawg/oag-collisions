@@ -35,6 +35,17 @@ pub const ARCSECOND: f64 = std::f64::consts::PI / (180.0 * 3600.0);
 /// One microarcsecond in radians.
 pub const MICROARCSECOND: f64 = ARCSECOND / 1e6;
 
+/// One astronomical unit in metres (IAU 2012 definition, exact).
+pub const AU: f64 = 149_597_870_700.0;
+
+/// Earth's orbital speed, m/s -- derived from the astronomical unit and the Julian year, which is
+/// why it is known to four digits independent of any star catalogue.
+pub const EARTH_ORBITAL_SPEED: f64 = 29_780.0;
+
+/// The IAU 2010 constant of aberration, arcseconds. This is the *classical* annual aberration:
+/// the angular radius of the ellipse each star traces over a year because Earth moves.
+pub const IAU_ABERRATION_CONSTANT: f64 = 20.49552;
+
 /// The solar system's galactic orbital radius: the Sun's distance from the galactic centre.
 /// ~8.2 kpc (Gravity Collaboration 2019; earlier values cluster at 8.0-8.3 kpc).
 pub const GALACTIC_RADIUS: f64 = 8.2e3 * PARSEC;
@@ -72,6 +83,17 @@ pub fn drift(speed: f64, radius: f64) -> AberrationDrift {
     }
 }
 
+/// The classical aberration *constant*: how far a star's apparent position is displaced by the
+/// observer's speed, as an angle. `kappa = v / c` radians.
+///
+/// This is the quantity the 20.5-arcsecond annual aberration is made of, and it is the second
+/// control for this module: a speed known to four digits (Earth's, from the AU and the year)
+/// produces a constant known to five (the IAU value). If the conversion does not land there, the
+/// `a / c` drift formula built on the same ratio is not trustworthy either.
+pub fn aberration_constant(speed: f64) -> f64 {
+    (speed / C).to_degrees() * 3600.0
+}
+
 /// The drift implied by the measured solar motion.
 pub fn measured_drift() -> AberrationDrift {
     drift(SUN_ORBITAL_SPEED, GALACTIC_RADIUS)
@@ -85,6 +107,38 @@ pub fn lightspeed_drift() -> AberrationDrift {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The second control, and the strongest one: Earth's orbital speed is known independently
+    /// from the astronomical unit and the Julian year, and it produces the classical aberration
+    /// constant that every star catalogue is corrected by. Same `v / c` ratio the galactic drift
+    /// formula uses, at a speed 10,000x larger and a distance 10,000x smaller.
+    #[test]
+    fn earths_speed_reproduces_the_classical_aberration_constant() {
+        let computed = aberration_constant(EARTH_ORBITAL_SPEED);
+        assert!(
+            (computed - IAU_ABERRATION_CONSTANT).abs() < 0.01,
+            "expected ~{IAU_ABERRATION_CONSTANT} arcsec (IAU), got {computed}"
+        );
+    }
+
+    /// Earth's orbit also produces a *drift*, and it is enormous by the standards of the galactic
+    /// one -- roughly 129 arcseconds per year, because the velocity vector turns through a full
+    /// circle annually. This is the effect the annual aberration ellipse is; measuring it is
+    /// routine. It is the same formula, at the opposite extreme of the parameter space.
+    #[test]
+    fn earths_orbit_produces_a_drift_far_larger_than_the_galactic_one() {
+        let earth = drift(EARTH_ORBITAL_SPEED, AU);
+        let galactic = measured_drift();
+        let earth_arcsec = earth.degrees_per_year * 3600.0;
+        assert!(
+            (120.0..140.0).contains(&earth_arcsec),
+            "Earth's annual aberration drift should be ~129 arcsec/year, got {earth_arcsec}"
+        );
+        // Seven and a half orders of magnitude apart: the same formula spans both extremes, which
+        // is what makes it a control rather than a fitted curve.
+        let ratio = earth_arcsec / (galactic.degrees_per_year * 3600.0);
+        assert!((1e7..1e8).contains(&ratio), "expected ~3e7, got {ratio}");
+    }
 
     /// The control case: the computed drift for the measured solar speed must land in the same
     /// place as the published secular aberration drift (~5 microarcseconds/year). If this fails,
