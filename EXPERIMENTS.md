@@ -187,3 +187,64 @@ performance with bigrams on the strength of an intuition.
 *character* n-gram hash rather than a word n-gram: character shingles are correlated too, but they
 do not depend on tokenization at all, which removes a whole class of failure from the measurement.
 Measured, not assumed.
+
+
+---
+
+## EXP-006 — SimHash sensitivity is inversely proportional to the number of units
+
+**Repository:** `oag-collisions`
+**Hypothesis.** The short-document failure was explained (EXP-004) as "the majority vote is decided
+by noise when there are few tokens". That explanation predicts short documents are *under*-sensitive.
+This experiment tests the prediction directly.
+
+**Procedure.** Fix a change (2 tokens replaced), vary the number of units, and count how many bits
+of the hash move. Word unigrams, one corpus, only the unit count changing.
+
+**Result (RUN, `362ca03`+).**
+
+| units | bits moved by a 2-token change |
+|---|---|
+| 10 | 17 |
+| 20 | 12 |
+| 50 | 4 |
+| 100 | 2 |
+| 200 | 0 |
+| 400 | 2 |
+| 800 | 1 |
+
+**Conclusion.** Sensitivity is **inversely proportional to the unit count**, and it collapses faster
+than a naive `sqrt(n)` model suggests -- at 200 units a 2-token change moved *zero* bits. The
+mechanism is straightforward: SimHash is a majority vote over bit positions, and adding units makes
+the vote harder to move. More units means more stability, and past a point it means insensitivity.
+
+**This contradicts the EXP-004 explanation, and the contradiction is the finding.** "Too few tokens
+to decide the vote" predicts short documents are under-sensitive; the measurement shows they are
+*over*-sensitive -- 10 units move 17 bits, 800 units move 1. So the 60-token failure is **not**
+explained by an undecided vote, and the earlier write-up was wrong about the mechanism even though
+its measurements were right.
+
+**What is actually established:**
+- Word unigrams work at 200 tokens (the correct variant wins on 51 shared bits) and fail at 60, 20
+  and 8 (measured, EXP-004).
+- Word bigrams and character n-grams do not fix it, and both degrade the working case (measured,
+  EXP-005). The character-trigram diagnostic makes the reason visible: with 887 units per document
+  the query and a variant sharing 885 of them produced hashes differing in **zero** bits -- the vote
+  is frozen.
+- The layer has a sensitivity *window*: too few units and the hash is noise; too many and it cannot
+  move. Where that window sits depends on how much documents differ.
+
+**Not established.** Why the 60-token case fails. Over-sensitivity alone would predict the near
+duplicate still wins (it moves fewer bits than an unrelated document), yet the measurement shows it
+losing. Something else is happening at that scale -- plausibly that with ~60 units the *other*
+variants' chance similarities are large enough to outrank a correct match separated by only a few
+bits. That is a hypothesis, not a result.
+
+**Consequence for the layer.** The unit count is a sensitivity dial, not just a memory dial, and the
+two are coupled in the opposite direction from intuition: **more units means less sensitivity**, so
+"index more text to be safe" can silently freeze the index. Any deployment should measure the
+sensitivity of its own unit count rather than assume more is better.
+
+**Follow-up (PLANNED).** Repeat the sensitivity sweep while varying how much the documents differ,
+to map the window: units on one axis, edit distance on the other, bits-moved as the surface. That
+would turn "the window exists" into "the window is here".

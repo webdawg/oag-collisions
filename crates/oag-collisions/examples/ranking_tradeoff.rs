@@ -8,7 +8,7 @@
 //!
 //! Run with `cargo run -p oag-collisions --example ranking_tradeoff`.
 
-use oag_collisions::{tokenize, CollisionIndex, HASH_BITS};
+use oag_collisions::{tokenize, CollisionIndex, Tokenizer, HASH_BITS};
 
 /// A deterministic generator, so the corpus is identical on every run. A tiny LCG is enough; this
 /// is test data, not a beacon.
@@ -70,13 +70,18 @@ fn measure(words: usize, variants: usize, levels: u32) -> (bool, bool, Option<us
     (rank == Some(1), top_tied, rank, index.bucket_entries())
 }
 
-/// Builds an index with the given shingle size and asks the query. Returns (top-1 correct, tied).
-fn build_and_ask(words: usize, variants: usize, shingle: usize) -> (bool, bool) {
+/// Builds an index with the given tokenizer and asks the query. Returns the same tuple as
+/// [`measure`], for a caller that wants to compare tokenizers rather than level counts.
+fn measure_with_tokenizer(
+    words: usize,
+    variants: usize,
+    levels: u32,
+    tokenizer: Tokenizer,
+) -> (bool, bool, Option<usize>, usize) {
     let documents = corpus(words, variants);
-    let mut index = CollisionIndex::with_capacity_levels_and_shingle(10_000, HASH_BITS, shingle);
+    let mut index = CollisionIndex::with_tokenizer(10_000, levels, tokenizer);
     for (position, document) in documents.iter().enumerate().skip(1) {
-        let text = document.join(" ");
-        index.insert_text(&format!("variant-{position}"), &text);
+        index.insert_text(&format!("variant-{position}"), &document.join(" "));
     }
     let results = index.collide_text(&documents[0].join(" "));
     let correct = format!("variant-1");
@@ -85,7 +90,7 @@ fn build_and_ask(words: usize, variants: usize, shingle: usize) -> (bool, bool) 
         .first()
         .map(|first| results.iter().filter(|c| c.shared_bits == first.shared_bits).count() > 1)
         .unwrap_or(false);
-    (rank == Some(1), top_tied)
+    (rank == Some(1), top_tied, rank, index.bucket_entries())
 }
 
 fn main() {
@@ -176,8 +181,8 @@ fn main() {
     println!("===================================================");
     println!("{:>8} {:>14} {:>14} {:>14}", "tokens", "unigram top-1", "bigram top-1", "bigram tie");
     for words in [200_usize, 60, 20, 8] {
-        let unigram = build_and_ask(words, variants, 1);
-        let bigram = build_and_ask(words, variants, 2);
+        let unigram = measure_with_tokenizer(words, variants, HASH_BITS, Tokenizer::Words { shingle: 1 });
+        let bigram = measure_with_tokenizer(words, variants, HASH_BITS, Tokenizer::Words { shingle: 2 });
         println!(
             "{:>8} {:>14} {:>14} {:>14}",
             words,
@@ -200,6 +205,93 @@ fn main() {
         println!("  {:<14} {} shared bits", collision.id, collision.shared_bits);
     }
     println!("  (correct is variant-1; unigram top was variant-1 at 51 bits)");
+
+    // Fourth sweep: the recorded follow-up. Character n-grams remove tokenization from the
+    // measurement entirely -- there is no tokenizer to get wrong, and a changed token still
+    // changes every character shingle overlapping it. Does that move the short-document failure?
+    println!();
+    println!("does character n-gram tokenization fix the short-document failure?");
+    println!("==============================================================");
+    println!(
+        "{:>8} {:>16} {:>16} {:>16}",
+        "tokens", "words (unigram)", "chars n=3", "chars n=5"
+    );
+    for words in [200_usize, 60, 20, 8] {
+        let mut row = format!("{words:>8}");
+        for tokenizer in [
+            Tokenizer::Words { shingle: 1 },
+            Tokenizer::Characters { n: 3 },
+            Tokenizer::Characters { n: 5 },
+        ] {
+            let (ok, _, _, _) = measure_with_tokenizer(words, variants, HASH_BITS, tokenizer);
+            row.push_str(&format!(" {:>16}", if ok { "yes" } else { "NO" }));
+        }
+        println!("{row}");
+    }
+
+    println!();
+    println!("diagnostic: character n-gram ranking at 200 tokens, top 5");
+    println!("==========================================================");
+    let documents = corpus(200, variants);
+    let mut index = CollisionIndex::with_tokenizer(
+        10_000,
+        HASH_BITS,
+        Tokenizer::Characters { n: 3 },
+    );
+    for (position, document) in documents.iter().enumerate().skip(1) {
+        index.insert_text(&format!("variant-{position}"), &document.join(" "));
+    }
+    let results = index.collide_text(&documents[0].join(" "));
+    println!("  units per document: {}", Tokenizer::Characters { n: 3 }.tokenize(&documents[0].join(" ")).len());
+    println!("  index reports {} collisions", results.len());
+    // Compute every variant's hash directly and compare with the query's.
+    let q_units = Tokenizer::Characters { n: 3 }.tokenize(&documents[0].join(" "));
+    let q_refs: Vec<&str> = q_units.iter().map(String::as_str).collect();
+    let q_hash = oag_collisions::simhash(&q_refs);
+    println!("  query hash:  {q_hash:016x}");
+    for position in 1..4 {
+        let units = Tokenizer::Characters { n: 3 }.tokenize(&documents[position].join(" "));
+        let refs: Vec<&str> = units.iter().map(String::as_str).collect();
+        let hash = oag_collisions::simhash(&refs);
+        let text = documents[position].join(" ");
+        println!(
+            "  variant-{position}: first 24 chars {:?}  hash {hash:016x}  differing bits {}",
+            &text[..text.len().min(24)],
+            (hash ^ q_hash).count_ones()
+        );
+    }
+    // The mechanism: SimHash sensitivity is inversely related to the number of units, because the
+    // majority vote gets harder to move as it gets larger. Measure that directly.
+    println!();
+    println!("  sensitivity vs number of units (a 2-token change, word unigrams):");
+    for units in [10_usize, 20, 50, 100, 200, 400, 800] {
+        let base: Vec<String> = (0..units).map(|i| format!("w{i}")).collect();
+        let mut changed = base.clone();
+        changed[0] = "x111111".into();
+        changed[1] = "x222222".into();
+        let a_refs: Vec<&str> = base.iter().map(String::as_str).collect();
+        let b_refs: Vec<&str> = changed.iter().map(String::as_str).collect();
+        let differing = (oag_collisions::simhash(&a_refs) ^ oag_collisions::simhash(&b_refs)).count_ones();
+        println!("    {units:>4} units -> {differing:>2} bits differ");
+    }
+    // Direct check, bypassing the index: how many leading bits do the query's and variant-1's
+    // trigram hashes actually share? If this is low, the index is not the problem.
+    let query_units = Tokenizer::Characters { n: 3 }.tokenize(&documents[0].join(" "));
+    let variant_units = Tokenizer::Characters { n: 3 }.tokenize(&documents[1].join(" "));
+    let q_refs: Vec<&str> = query_units.iter().map(String::as_str).collect();
+    let v_refs: Vec<&str> = variant_units.iter().map(String::as_str).collect();
+    let q_hash = oag_collisions::simhash(&q_refs);
+    let v_hash = oag_collisions::simhash(&v_refs);
+    let differing = (q_hash ^ v_hash).count_ones();
+    println!("  direct simhash differing bits: {differing} of 64 (query vs variant-1)");
+    let same = query_units.iter().filter(|u| variant_units.contains(u)).count();
+    println!("  units shared between them: {same} of {}", query_units.len());
+    if results.is_empty() {
+        println!("  no collisions above the {}-bit threshold at all", oag_collisions::MIN_COLLISION_BITS);
+    }
+    for collision in results.iter().take(5) {
+        println!("  {:<14} {} shared bits", collision.id, collision.shared_bits);
+    }
 
     println!();
     println!("read the second table as the real result: for short documents no level count gets");

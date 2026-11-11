@@ -66,6 +66,61 @@ pub fn shingles(tokens: &[String], max_n: usize) -> Vec<String> {
     out
 }
 
+/// How an item's text is turned into the units the hash sees.
+///
+/// Two schemes, because the short-document failure turned out to depend on tokenization: word
+/// n-grams are only as good as the tokenizer, and a synthetic or malformed token stream is a real
+/// case this layer has to survive. Character n-grams remove that dependency entirely -- there is
+/// no tokenization step to get wrong, and a changed token still changes every character shingle
+/// that overlaps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tokenizer {
+    /// Lowercased alphanumeric word tokens, optionally expanded with word n-grams (see
+    /// [`shingles`]). This is the default.
+    Words { shingle: usize },
+    /// Overlapping character n-grams of the raw text, case-preserving. `n` is clamped to at least 1.
+    Characters { n: usize },
+}
+
+impl Default for Tokenizer {
+    fn default() -> Self {
+        Tokenizer::Words { shingle: 1 }
+    }
+}
+
+impl Tokenizer {
+    /// Produces the units to hash for `text`.
+    pub fn tokenize(&self, text: &str) -> Vec<String> {
+        match self {
+            Tokenizer::Words { shingle } => shingles(&tokenize(text), *shingle),
+            Tokenizer::Characters { n } => char_shingles(text, *n),
+        }
+    }
+
+    /// A short name for reporting.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Tokenizer::Words { shingle: 1 } => "word unigrams",
+            Tokenizer::Words { .. } => "word n-grams",
+            Tokenizer::Characters { .. } => "character n-grams",
+        }
+    }
+}
+
+/// Overlapping character n-grams of `text`, exactly as they appear (case preserved).
+///
+/// Deliberately not lowercased: a character shingle is a byte-level fingerprint, and folding case
+/// would throw away information the scheme is meant to keep. For a comparison that should ignore
+/// case, lowercase the text before calling.
+pub fn char_shingles(text: &str, n: usize) -> Vec<String> {
+    let n = n.max(1);
+    let characters: Vec<char> = text.chars().collect();
+    if characters.len() < n {
+        return characters.iter().map(|c| c.to_string()).collect();
+    }
+    characters.windows(n).map(|window| window.iter().collect()).collect()
+}
+
 /// The minimum shared prefix for two items to count as a collision at all.
 ///
 /// Below this the shared bits are noise: two random 64-bit hashes share ~1 bit on average, so a
@@ -148,9 +203,10 @@ pub struct CollisionIndex {
     /// and a coarser ranking, since two items sharing more than `levels` bits are tied. Whether
     /// that trade is worth making is measured in `examples/ranking_tradeoff.rs`, not assumed.
     prefix_levels: u32,
-    /// How many tokens to combine into one hashed unit: 1 is unigrams (the default), 2 adds
-    /// word bigrams. See [`shingles`] for why the default is not always enough.
-    shingle: usize,
+    /// How text is turned into the units the hash sees. One index, one tokenizer, for the same
+    /// reason it has one prefix-level count: hashes built from different unit schemes are not
+    /// comparable.
+    tokenizer: Tokenizer,
 }
 
 impl Default for CollisionIndex {
@@ -185,19 +241,24 @@ impl CollisionIndex {
     /// `shingle = 2` hashes unigrams and word bigrams together, which is the measured fix to try
     /// for short documents -- see [`shingles`].
     pub fn with_capacity_levels_and_shingle(max_items: usize, prefix_levels: u32, shingle: usize) -> Self {
+        Self::with_tokenizer(max_items, prefix_levels, Tokenizer::Words { shingle })
+    }
+
+    /// As [`Self::with_capacity_and_levels`], with an explicit tokenizer.
+    pub fn with_tokenizer(max_items: usize, prefix_levels: u32, tokenizer: Tokenizer) -> Self {
         Self {
             buckets: HashMap::new(),
             hashes: HashMap::new(),
             order: std::collections::VecDeque::new(),
             max_items,
             prefix_levels: prefix_levels.clamp(1, HASH_BITS),
-            shingle: shingle.max(1),
+            tokenizer,
         }
     }
 
-    /// The shingle size this index hashes with.
-    pub fn shingle(&self) -> usize {
-        self.shingle
+    /// The tokenizer this index hashes with.
+    pub fn tokenizer(&self) -> &Tokenizer {
+        &self.tokenizer
     }
 
     /// How many prefix levels this index resolves.
@@ -305,9 +366,8 @@ impl CollisionIndex {
 
     /// Convenience for free text, expanded with this index's shingle size.
     pub fn collide_text(&self, text: &str) -> Vec<Collision<'_>> {
-        let tokens = tokenize(text);
-        let expanded = shingles(&tokens, self.shingle);
-        let refs: Vec<&str> = expanded.iter().map(String::as_str).collect();
+        let units = self.tokenizer.tokenize(text);
+        let refs: Vec<&str> = units.iter().map(String::as_str).collect();
         self.collide(&refs)
     }
 
@@ -334,6 +394,50 @@ impl CollisionIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Character trigrams are what the character tokenizer hashes, so the hash's sensitivity must
+    /// be checked on them directly -- the word-token check above does not transfer.
+    #[test]
+    fn character_trigrams_respond_to_text_changes() {
+        let query = "w0 w1 w2 w3 w4 w5 w6 w7 w8 w9";
+        let near = "w0 w1 w2 w3 w4 w5 w6 w7 w8 x9";
+        let far = "y0 y1 y2 y3 y4 y5 y6 y7 y8 y9";
+
+        let units = |text: &str| {
+            let units = char_shingles(text, 3);
+            let refs: Vec<&str> = units.iter().map(String::as_str).collect();
+            simhash(&refs)
+        };
+
+        let (q, n, f) = (units(query), units(near), units(far));
+        let near_differs = (q ^ n).count_ones();
+        let far_differs = (q ^ f).count_ones();
+        println!("near differs in {near_differs} bits, far differs in {far_differs} bits");
+        assert!(
+            near_differs < far_differs,
+            "a one-token change must move fewer bits than a full rewrite: near {near_differs}, far {far_differs}"
+        );
+    }
+
+    /// A sanity check on the hash itself: two token sets differing in one element must share most
+    /// of their hash. If this fails, the majority vote is broken and every collision measurement
+    /// above is measuring the breakage.
+    #[test]
+    fn a_one_token_change_moves_only_a_few_bits() {
+        let base: Vec<String> = (0..200).map(|i| format!("w{i}")).collect();
+        let refs: Vec<&str> = base.iter().map(String::as_str).collect();
+        let mut changed = base.clone();
+        changed[0] = "x123456".to_string();
+        let changed_refs: Vec<&str> = changed.iter().map(String::as_str).collect();
+
+        let a = simhash(&refs);
+        let b = simhash(&changed_refs);
+        let shared = u64::BITS - (a ^ b).leading_zeros();
+        assert!(
+            shared >= 40,
+            "changing 1 of 200 tokens should leave most of the hash intact, shared prefix was {shared} bits"
+        );
+    }
 
     #[test]
     fn identical_input_collides_fully() {
