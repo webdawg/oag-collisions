@@ -476,6 +476,37 @@ impl CollisionIndex {
 mod tests {
     use super::*;
 
+    /// `unigram_weight` exists so a *fractional* bigram vote is expressible: the vote weights are
+    /// integers, so unigrams 10 with bigrams 1 gives bigrams a tenth of a vote. Before it was
+    /// exposed, no ratio between 0 and 1 could be reached at all.
+    #[test]
+    fn unigram_weight_scales_the_unigram_vote_relative_to_bigrams() {
+        let text = "alpha beta gamma delta";
+        let units = |unigram: i32, bigram: i32| {
+            Tokenizer::Words { shingle: 2, unigram_weight: unigram, bigram_weight: bigram }
+                .tokenize(text)
+        };
+        let plain = units(1, 0);
+        assert!(plain.iter().all(|(_, w)| *w == 1), "bigrams off means all weights 1");
+        let scaled = units(10, 1);
+        let unigram_votes: Vec<i32> = scaled
+            .iter()
+            .filter(|(unit, _)| !unit.contains(' '))
+            .map(|(_, w)| *w)
+            .collect();
+        let bigram_votes: Vec<i32> = scaled
+            .iter()
+            .filter(|(unit, _)| unit.contains(' '))
+            .map(|(_, w)| *w)
+            .collect();
+        assert!(unigram_votes.iter().all(|w| *w == 10));
+        assert!(bigram_votes.iter().all(|w| *w == 1));
+        // The ratio is what matters: a bigram carries a tenth of a unigram's vote.
+        assert_eq!(unigram_votes.len(), 4);
+        assert_eq!(bigram_votes.len(), 3);
+        assert_eq!(plain.len(), 4, "bigrams off means only unigrams");
+    }
+
     /// Regression test for a real defect: `insert_text` used the free `tokenize` function and so
     /// ignored the index's tokenizer, while `collide_text` honoured it. An index configured for
     /// bigrams therefore indexed unigrams and queried with bigrams, and every cross-tokenizer
