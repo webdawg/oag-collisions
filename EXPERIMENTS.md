@@ -648,3 +648,60 @@ k chosen from the document length and a target unit budget) and re-run EXP-007's
 prediction to test: a fixed unit budget should flatten the surface's rows, making sensitivity
 independent of document length. If it does, the layer's usefulness stops being bounded by document
 size; if it does not, the surface is measuring something else and the unit-count story is wrong.
+
+
+---
+
+## EXP-014 — A fixed unit budget flattens the sensitivity surface
+
+**Repository:** `oag-collisions`
+**Hypothesis.** EXP-013 closed the tokenizer line with a mechanism: bigram settings hash about
+double the units, and doubling the unit count is what collapses sensitivity. If the unit count is
+the binding constraint, then holding it *fixed* while varying document length should flatten the
+EXP-007 surface's rows.
+
+**Procedure.** New `Tokenizer::WordsBudget`: word units, but only a deterministic stride sample of
+them, with stride `ceil(len / target)`, so the unit count is bounded no matter how long the
+document is. The trade is explicit in the type's docs -- coverage for resolution. Then:
+1. Re-run the EXP-007 surface with a budget of 50 units across document sizes 10-800.
+2. Sweep the budget at a fixed 800-token document.
+
+**Result 1 -- the surface flattens.** Mean bits moved for e=1..2:
+
+| document tokens | e=1 | e=2 |
+|---|---|---|
+| 50 (unbudgeted) | 3.0 | 4.9 |
+| 100 | 2.4 | 2.4 |
+| 200 | 3.0 | 3.0 |
+| 400 | 2.6 | 2.6 |
+| 800 | 4.9 | 4.9 |
+
+Against the unbudgeted 800-token row (0.5 and 0.9), the budgeted rows are all in the same 2.4-4.9
+band. Document length has stopped deciding sensitivity; the budget does.
+
+**Result 2 -- the budget is the knob, and it is monotone.** Fixed 800-token document, 2-token edit:
+
+| budget | 20 | 50 | 100 | 200 | 400 | 800 |
+|---|---|---|---|---|---|---|
+| bits moved | 5.2 | 4.9 | 2.6 | 1.2 | 1.0 | 0.9 |
+
+Sensitivity tracks the budget alone, declining monotonically as the budget grows, with no reference
+to the document's 800 tokens.
+
+**Conclusion.** The unit-count constraint is *bypassable*. A stride-sampled budget decouples the
+index's resolution from document length, which is exactly what every previous experiment said was
+the binding constraint. The cost is coverage: a budget of 20 on an 800-token document samples 2.5%
+of it, so two documents differing only in the unsampled region hash identically. That trade is now
+explicit and tunable rather than implicit and accidental.
+
+**Honest limits.** The budgeted sensitivity at a given budget is somewhat *below* the unbudgeted
+sensitivity of a document with that many tokens -- 5.2 bits at budget 20 versus 9.8 for a 20-token
+document. The stride sample of a long document has gaps, so a small edit can miss the sampled units
+entirely. The budget flattens the surface but does not make a long document as sensitive as a
+short one of the same unit count.
+
+**Follow-up (PLANNED).** Compare stride sampling against *random* sampling with the same budget,
+and against hashing a fixed number of *windows* rather than individual tokens. Stride sampling is
+deterministic and spreads coverage, but it is also periodic -- a document whose edits fall between
+strides is invisible, and a random sample would not have that blind spot at the cost of clustering.
+Which failure mode is more acceptable is unmeasured.

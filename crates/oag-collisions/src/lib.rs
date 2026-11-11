@@ -89,6 +89,25 @@ pub enum Tokenizer {
     Words { shingle: usize, unigram_weight: i32, bigram_weight: i32 },
     /// Overlapping character n-grams of the raw text, case-preserving. `n` is clamped to at least 1.
     Characters { n: usize },
+    /// Word units, but only a deterministic *sample* of them, so the unit count is bounded no
+    /// matter how long the document is.
+    ///
+    /// Every measurement in `EXPERIMENTS.md` points the same way: the unit count is the binding
+    /// constraint, not the document length or the unit composition. A 40-token document and a
+    /// 200-token one hash 40 and 200 units, and EXP-007 showed that doubling the units collapses
+    /// sensitivity. This variant holds the budget fixed instead: it takes every k-th unit with
+    /// k = ceil(len / target), which spreads the sample across the whole document rather than
+    /// truncating it.
+    ///
+    /// The trade is coverage for resolution. A stride sample of a long document sees a fraction of
+    /// it, so two documents that differ only in the unsampled region hash identically. Whether
+    /// that trade is worth making is exactly what EXP-014 measures.
+    WordsBudget {
+        shingle: usize,
+        unigram_weight: i32,
+        bigram_weight: i32,
+        target_units: usize,
+    },
 }
 
 impl Default for Tokenizer {
@@ -125,6 +144,22 @@ impl Tokenizer {
             Tokenizer::Characters { n } => {
                 char_shingles(text, *n).into_iter().map(|unit| (unit, 1)).collect()
             }
+            Tokenizer::WordsBudget { shingle, unigram_weight, bigram_weight, target_units } => {
+                let mut units = Tokenizer::Words {
+                    shingle: *shingle,
+                    unigram_weight: *unigram_weight,
+                    bigram_weight: *bigram_weight,
+                }
+                .tokenize(text);
+                let target = (*target_units).max(1);
+                if units.len() > target {
+                    // Stride sample: keeps the sample spread across the document rather than
+                    // truncating it, and is fully deterministic.
+                    let stride = (units.len() + target - 1) / target;
+                    units = units.into_iter().step_by(stride).take(target).collect();
+                }
+                units
+            }
         }
     }
 
@@ -142,6 +177,9 @@ impl Tokenizer {
                 )
             }
             Tokenizer::Characters { n } => format!("character {n}-grams"),
+            Tokenizer::WordsBudget { target_units, .. } => {
+                format!("word units, budget {target_units}")
+            }
         }
     }
 }
@@ -475,6 +513,28 @@ impl CollisionIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The budget tokenizer exists because every measurement points at the unit count as the
+    /// binding constraint. It holds that count fixed regardless of document length, so sensitivity
+    /// should stop depending on length. Two properties matter and are asserted: the budget is
+    /// honoured exactly, and the sample is deterministic (a stride sample, not a random one).
+    #[test]
+    fn the_budget_tokenizer_honours_its_target_and_is_deterministic() {
+        let text = (0..1000).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ");
+        let tokenizer = Tokenizer::WordsBudget {
+            shingle: 1,
+            unigram_weight: 1,
+            bigram_weight: 0,
+            target_units: 50,
+        };
+        let units = tokenizer.tokenize(&text);
+        assert_eq!(units.len(), 50, "a 1000-token document must hash exactly 50 units");
+        assert_eq!(units, tokenizer.tokenize(&text), "the sample must be deterministic");
+
+        // A document already under budget is passed through unsampled.
+        let short = tokenizer.tokenize("alpha beta gamma");
+        assert_eq!(short.len(), 3);
+    }
 
     /// `unigram_weight` exists so a *fractional* bigram vote is expressible: the vote weights are
     /// integers, so unigrams 10 with bigrams 1 gives bigrams a tenth of a vote. Before it was

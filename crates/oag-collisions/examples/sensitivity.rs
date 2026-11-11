@@ -43,6 +43,34 @@ fn bits_moved(units: usize, edits: usize, seed: u64) -> u32 {
 /// The weight is an `i32` and unigrams are fixed at 1, so the smallest non-zero bigram
 /// contribution is a *full* vote -- there is no fractional setting through the tokenizer. That
 /// makes the knob coarse, and this measures how coarse.
+/// Bits moved for a given document size and edit distance, under a fixed unit budget.
+fn budgeted_bits_moved(tokens: usize, edits: usize, target_units: usize, seed: u64) -> f64 {
+    let tokenizer = Tokenizer::WordsBudget {
+        shingle: 1,
+        unigram_weight: 1,
+        bigram_weight: 0,
+        target_units,
+    };
+    let capped = edits.min(tokens / 2);
+    let mut total = 0u64;
+    let seeds = 8u64;
+    for s in 0..seeds {
+        let mut rng = Lcg(seed + s * 7919);
+        let mut changed = document(tokens);
+        for slot in changed.iter_mut().take(capped) {
+            *slot = format!("x{}", rng.next() % 1_000_000);
+        }
+        let base_units = tokenizer.tokenize(&document(tokens).join(" "));
+        let sub_units = tokenizer.tokenize(&changed.join(" "));
+        let base_refs: Vec<(&str, i32)> =
+            base_units.iter().map(|(unit, w)| (unit.as_str(), *w)).collect();
+        let sub_refs: Vec<(&str, i32)> =
+            sub_units.iter().map(|(unit, w)| (unit.as_str(), *w)).collect();
+        total += (simhash_weighted(&base_refs) ^ simhash_weighted(&sub_refs)).count_ones() as u64;
+    }
+    total as f64 / seeds as f64
+}
+
 fn main() {
     println!("bigram vote weight: order sensitivity against substitution sensitivity");
     println!("========================================================================");
@@ -254,6 +282,47 @@ fn main() {
         let e4 = mean_bits_moved(units, 4, seeds);
         println!("{:>6} {:>10.1} {:>10.1} {:>10.1}", units, e2, e4, e4 - e2);
     }
+    // EXP-014: if the unit count is the binding constraint, holding it fixed should flatten the
+    // surface's rows -- a 400-token document sampled to 50 units should behave like a 50-token
+    // document, not like a 400-unit one.
+    println!();
+    println!("same surface under a fixed unit budget of 50");
+    println!("============================================");
+    print!("{:>6}", "units");
+    for edits in edit_distances {
+        print!(" {:>5}", format!("e={edits}"));
+    }
+    println!();
+    println!("{}", "-".repeat(6 + 6 * edit_distances.len()));
+    for tokens in unit_counts {
+        print!("{:>6}", tokens);
+        for edits in edit_distances {
+            print!(
+                " {:>5.1}",
+                budgeted_bits_moved(tokens, edits, 50, 0x5EED)
+            );
+        }
+        println!();
+    }
+    println!();
+    println!("budget sweep at a fixed 800-token document (e=2)");
+    println!("==================================================");
+    for budget in [20_usize, 50, 100, 200, 400, 800] {
+        println!(
+            "  budget {budget:>4} units -> {:.1} bits moved",
+            budgeted_bits_moved(800, 2, budget, 0x5EED)
+        );
+    }
+    println!();
+    println!("read the sweep as: the budget should recover the sensitivity of a short document without");
+    println!("truncating it. The floor is set by the budget itself -- a budget of 20 cannot resolve a");
+    println!("2-token edit any better than a 20-token document can.");
+
+    println!();
+    println!("read this as the EXP-007 surface with the rows for 100+ tokens collapsed onto the 50-token");
+    println!("row. If they are not, the unit-count story is wrong and the surface is measuring something");
+    println!("else. Rows for documents shorter than the budget cannot be sampled, so they stay distinct.");
+
     println!();
     println!("reading the surface");
     println!("===================");
