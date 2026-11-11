@@ -381,6 +381,64 @@ fn main() {
     println!("right thing for a reason. One that hovers around zero with a large standard deviation is");
     println!("a coin flip, and its top-1 result on any single corpus means nothing.");
 
+    // EXP-012 located the binding constraint at the unit count, and the EXP-007 surface says a
+    // 2-token edit is comfortably visible at 50-100 units (~4-6 bits) but marginal at 200. Repeat
+    // the margin measurement there: do the tokenizer settings separate in the resolvable band?
+    for tokens in [40_usize, 60, 100, 200] {
+        println!();
+        println!(
+            "document size {tokens} tokens -- margin over 8 corpora, and the unit count each setting hashes"
+        );
+        println!("{:=>68}", "");
+        println!(
+            "{:>8} {:>8} {:>8} {:>12} {:>12} {:>12} {:>10}",
+            "unigram", "bigram", "ratio", "mean margin", "std dev", "positive", "units"
+        );
+        for (unigram, bigram) in [
+            (1_i32, 0_i32),
+            (1, 1),
+            (1, 2),
+            (2, 1),
+            (1, 4),
+        ] {
+            let tokenizer =
+                Tokenizer::Words { shingle: 2, unigram_weight: unigram, bigram_weight: bigram };
+            let units = tokenizer.tokenize(&(0..tokens).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ")).len();
+            let corpora = 8_u64;
+            let mut margins = Vec::new();
+            let mut invisible = 0_usize;
+            for seed in 0..corpora {
+                match margin(tokens, 60.min(tokens / 4 + 1), HASH_BITS, tokenizer, 0x5EED + seed * 7919) {
+                    Some(m) => margins.push(m),
+                    None => invisible += 1,
+                }
+            }
+            if margins.is_empty() {
+                println!(
+                    "{:>8} {:>8} {:>8} {:>12} {:>12} {:>10} {:>10}",
+                    unigram, bigram,
+                    format!("{:.2}", bigram as f64 / unigram as f64),
+                    "--", "--", format!("0/0 invis {invisible}"), units
+                );
+                continue;
+            }
+            let mean = margins.iter().sum::<i32>() as f64 / margins.len() as f64;
+            let variance = margins.iter().map(|m| (*m as f64 - mean).powi(2)).sum::<f64>()
+                / margins.len() as f64;
+            let positive = margins.iter().filter(|m| **m > 0).count();
+            println!(
+                "{:>8} {:>8} {:>8} {:>12.1} {:>12.1} {:>12} {:>10}",
+                unigram,
+                bigram,
+                format!("{:.2}", bigram as f64 / unigram as f64),
+                mean,
+                variance.sqrt(),
+                format!("{}/{} invis {}", positive, margins.len(), invisible),
+                units
+            );
+        }
+    }
+
     println!();
     println!("read the second table as the real result: for short documents no level count gets");
     println!("top-1 right, because the hash itself is decided by noise at that length -- the level");

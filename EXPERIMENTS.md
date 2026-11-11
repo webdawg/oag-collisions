@@ -584,3 +584,67 @@ surface says a 2-token edit is comfortably visible (50-100 units, ~4-6 bits), an
 tokenizer settings separate there. If they do not separate even in the resolvable band, the
 tokenizer choice is genuinely not the lever and the layer's usefulness is bounded by document
 length.
+
+
+---
+
+## EXP-013 — Do the tokenizer settings separate in the resolvable band?
+
+**Repository:** `oag-collisions`
+**Hypothesis.** EXP-012 located the binding constraint at the unit count, and the EXP-007 surface
+says a 2-token edit is comfortably visible at 50-100 units (~4-6 bits). So the tokenizer settings
+should separate there: bigrams add order sensitivity, and at a size where unigrams work they might
+win on both axes.
+
+**Procedure.** Repeat the 8-corpus margin measurement at 40, 60, 100 and 200 document tokens, for
+five tokenizer settings, reporting the mean margin, its standard deviation, how many corpora gave
+a positive margin, how many made the correct variant *invisible*, and the unit count each setting
+hashes.
+
+**Result (RUN, `10f78f6`+).**
+
+| tokens | setting | mean margin | std dev | positive | invisible | units |
+|---|---|---|---|---|---|---|
+| 40 | 1:0 | 12.5 | 3.5 | 2/2 | 6 | 40 |
+| 40 | 1:1 | -- | -- | 0/0 | 8 | 79 |
+| 60 | 1:0 | 22.0 | 22.0 | 1/2 | 6 | 60 |
+| 60 | 1:1 | 3.2 | 6.7 | 2/5 | 3 | 119 |
+| 60 | 1:2 | 8.0 | 0.0 | 1/1 | 7 | 119 |
+| 100 | 1:0 | 14.8 | 30.8 | 2/4 | 4 | 100 |
+| 100 | 1:1 | **-8.5** | 6.0 | 0/6 | 2 | 199 |
+| 100 | 1:2 | **-5.2** | 3.8 | 0/6 | 2 | 199 |
+| 200 | 1:0 | 5.7 | 15.3 | 2/6 | 2 | 200 |
+| 200 | 1:1 | 6.0 | 28.0 | 3/8 | 0 | 399 |
+
+**Conclusion: the tokenizer settings do not separate in the resolvable band -- they anti-separate.**
+At 100 tokens, where unigrams give a positive mean margin of 14.8, both bigram settings give
+**negative** margins (-8.5 and -5.2) across six corpora each, with small standard deviations.
+Bigrams are reliably *worse* exactly where unigrams work.
+
+**The mechanism is visible in the units column.** Bigram settings hash 79 units for a 40-token
+document and 199 for 100 -- roughly **double** the unigram count, because every token yields a
+unigram *and* a bigram. EXP-007 measured that doubling the unit count collapses sensitivity: 200
+units moves ~1.5 bits for a 2-token edit, and 100 units moves ~2. So the bigrams do not merely
+fail to help; they push the document into the band where the vote is too large to move.
+
+This closes the parameter-tuning line with a mechanism rather than a shrug:
+
+- **Unigrams at 50-100 units** are the only configuration measured that works at all.
+- **Every bigram configuration hashes about twice the units and lands in the frozen band.** The
+  tokenizer choice and the unit-count constraint are the *same* constraint.
+- The `bigram_weight` knob therefore cannot rescue order sensitivity at practical document sizes:
+  to make order visible it must contribute enough votes to matter, and those votes are what freeze
+  substitution sensitivity.
+
+**The lever this points at.** If the unit count is the binding constraint, the direction that
+matters is **reducing** it, not changing its composition: hash a *sample* of the document's tokens
+rather than all of them, keeping the unit count in the 50-100 band regardless of document length.
+That is a genuinely different mechanism -- it trades coverage for resolution -- and it is
+unmeasured. It would also make the index's behaviour independent of document size, which every
+measurement here says is the thing that currently decides success.
+
+**Follow-up (PLANNED).** Implement token sampling (deterministic, e.g. every k-th token for a
+k chosen from the document length and a target unit budget) and re-run EXP-007's surface. The
+prediction to test: a fixed unit budget should flatten the surface's rows, making sensitivity
+independent of document length. If it does, the layer's usefulness stops being bounded by document
+size; if it does not, the surface is measuring something else and the unit-count story is wrong.
