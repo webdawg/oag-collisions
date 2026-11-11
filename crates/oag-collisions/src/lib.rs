@@ -395,6 +395,26 @@ impl CollisionIndex {
 mod tests {
     use super::*;
 
+    /// EXP-008: unigram SimHash is *exactly* invariant to token order, because the majority vote
+    /// sums each token once and a permutation does not change a sum. This is a structural property
+    /// of the scheme, not a tuning artifact -- no level count or capacity removes it -- so it is
+    /// asserted as an equality rather than a threshold.
+    #[test]
+    fn unigram_hash_is_exactly_invariant_to_token_order() {
+        let forward: Vec<String> = (0..200).map(|i| format!("w{i}")).collect();
+        let mut reversed = forward.clone();
+        reversed.reverse();
+        let mut swapped = forward.clone();
+        swapped.swap(10, 11);
+
+        let f_refs: Vec<&str> = forward.iter().map(String::as_str).collect();
+        let r_refs: Vec<&str> = reversed.iter().map(String::as_str).collect();
+        let s_refs: Vec<&str> = swapped.iter().map(String::as_str).collect();
+
+        assert_eq!(simhash(&f_refs), simhash(&r_refs), "a full reversal must not change the hash");
+        assert_eq!(simhash(&f_refs), simhash(&s_refs), "an adjacent swap must not change the hash");
+    }
+
     /// Character trigrams are what the character tokenizer hashes, so the hash's sensitivity must
     /// be checked on them directly -- the word-token check above does not transfer.
     #[test]

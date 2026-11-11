@@ -22,6 +22,20 @@ indexed, and the longest shared prefix ranks the result.
 
 No vector database, no embedding model, no training. One deterministic function and a `HashMap`.
 
+## What it is structurally blind to
+
+Unigram SimHash sums each token's bits once, so **permuting a document does not change its hash at
+all**. Measured (`examples/ordering.rs`): a 200-token document and its full reversal collide at
+**64 shared bits** -- a perfect, full-strength collision -- and an adjacent swap is likewise
+invisible. This is an invariance, not a sensitivity limit: no level count, capacity, or threshold
+setting removes it. Two documents that share every word but assert something entirely different are
+the same document to a unigram index.
+
+Word bigrams do detect order (24 bits moved by a full reversal), but EXP-005 in `EXPERIMENTS.md`
+measured them degrading the substitution case. The layer therefore faces a real either/or:
+**unigrams are blind to order; bigrams cost substitution sensitivity.** That trade is measured, not
+chosen.
+
 ## The bound
 
 Every item is stored under all 64 prefixes of its hash, so memory is `O(items * 64)` map entries --
