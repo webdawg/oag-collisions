@@ -429,6 +429,58 @@ fn main() {
     println!("because every window overlapping the edit changes; its cost is coarser units, which is");
     println!("why its per-position values are lower than the stride's peak.");
 
+    // EXP-019: measure the absorption floor directly. Fix the edit and the position sweep,
+    // vary only the budget, and find where the detection rate stops rising. The prediction from
+    // EXP-018 is that the floor falls as the budget grows, because a changed unit becomes a
+    // larger fraction of a smaller sample.
+    println!();
+    println!("absorption floor: detection rate vs unit budget (window 3, 800 tokens, 8 seeds)");
+    println!("==============================================================================");
+    let tokens = 800_usize;
+    let flat: Vec<String> = (0..tokens).map(|i| format!("w{i}")).collect();
+    let window = 3_usize;
+    let seeds = 8_u64;
+    println!(
+        "{:>8} {:>14} {:>12} {:>10}",
+        "budget", "detected", "missed", "rate"
+    );
+    for budget in [1_usize, 5, 10, 20, 50, 100, 200, 400, 800] {
+        let mut detected = 0_usize;
+        let mut trials = 0_usize;
+        for offset in (0..tokens - 2).step_by(2) {
+            for seed in 0..seeds {
+                let mut changed = flat.clone();
+                let mut rng = Lcg(0x5EED + seed * 7919);
+                changed[offset] = format!("x{}", rng.next() % 1_000_000);
+                changed[offset + 1] = format!("x{}", rng.next() % 1_000_000);
+                let base_text = flat.join(" ");
+                let base_units = Tokenizer::WordsWindowBudget { window, target_units: budget }
+                    .tokenize(&base_text);
+                let base_refs: Vec<(&str, i32)> =
+                    base_units.iter().map(|(u, w)| (u.as_str(), *w)).collect();
+                let units = Tokenizer::WordsWindowBudget { window, target_units: budget }
+                    .tokenize(&changed.join(" "));
+                let refs: Vec<(&str, i32)> =
+                    units.iter().map(|(u, w)| (u.as_str(), *w)).collect();
+                if (simhash_weighted(&base_refs) ^ simhash_weighted(&refs)).count_ones() > 0 {
+                    detected += 1;
+                }
+                trials += 1;
+            }
+        }
+        println!(
+            "{:>8} {:>14} {:>12} {:>9.1}%",
+            budget,
+            detected,
+            trials - detected,
+            100.0 * detected as f64 / trials as f64
+        );
+    }
+    println!();
+    println!("read this as: the budget at which the rate stops rising is where the vote stops");
+    println!("absorbing a changed unit. Below it, absorption is the binding limit; above it, coverage");
+    println!("is. If the rate is flat across the sweep, absorption is not the mechanism.");
+
     println!();
     println!("read this as: a setting whose mean margin is positive across most corpora is doing the");
     println!("right thing for a reason. One that hovers around zero with a large standard deviation is");

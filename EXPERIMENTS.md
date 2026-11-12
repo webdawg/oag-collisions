@@ -908,3 +908,61 @@ a direct test would fix the edit size and vary the budget until the floor moves,
 from 1 to 400 and find where the detection rate stops rising. The prediction is that the floor falls
 as the budget grows, because a changed unit becomes a larger fraction of a smaller sample. If it does
 not, absorption is not the mechanism and the coverage story is incomplete.
+
+---
+
+## EXP-020 — There is an optimal unit budget; hashing everything is worse
+
+**Repository:** `oag-collisions`
+**Hypothesis.** EXP-018 inferred an absorption floor: the majority vote absorbs a changed unit when
+that unit is a small fraction of the sample. EXP-019 set out to measure the floor directly by
+fixing the edit and sweeping the budget, predicting the floor falls as the budget grows because a
+changed unit becomes a larger fraction of a smaller sample.
+
+**Procedure.** 800-token document, 2-token edit, window 3, 8 seeds, edit position swept every
+second position. Budget varied over 1, 5, 10, 20, 50, 100, 200, 400, 800. (Budget 800 hashes every
+window -- no sampling at all.)
+
+**Result (RUN, `819cc25`+).**
+
+| budget | detected | missed | rate |
+|---|---|---|---|
+| 1 | 16 | 3176 | 0.5% |
+| 5 | 80 | 3112 | 2.5% |
+| 10 | 160 | 3032 | 5.0% |
+| 20 | 320 | 2872 | 10.0% |
+| 50 | 797 | 2395 | 25.0% |
+| 100 | 1561 | 1631 | 48.9% |
+| **200** | **2762** | **430** | **86.5%** |
+| 400 | 1794 | 1398 | 56.2% |
+| 800 | 1433 | 1759 | 44.9% |
+
+**The rate peaks at budget 200 and falls on both sides.** This is the opposite of the naive
+prediction in two ways:
+
+- Below 200 the rate is **coverage-limited**: too few units are hashed for the edit to be sampled
+  often (budget 1 hashes a single window out of 798).
+- Above 200 the rate is **absorption-limited**: more units are hashed, but a changed unit becomes
+  a smaller fraction of a larger vote, and the vote margin grows with `sqrt(N)`, so a fixed-size
+  edit flips *fewer* bits.
+
+**Conclusion: sampling is not merely a memory optimisation -- it improves detection sensitivity.**
+Hashing every window (budget 800) is *worse* than sampling 25% of them (86.5% vs 44.9%). The
+mechanism is that SimHash's per-bit vote margin scales with the square root of the unit count, so a
+fixed-size edit is relatively larger in a smaller sample and flips more bits. There is an optimum
+where coverage and sensitivity balance, and here it sits near 25% of the candidate windows.
+
+**Consequence for the layer.** The unit budget is a sensitivity dial as well as a memory dial, and
+"index everything" is the wrong default. A deployment should measure its own optimum against its
+edit model; the 25% figure is specific to a 2-token edit in an 800-token document with 3-token
+windows.
+
+**Honest limits.** One document size, one window width, one edit size, one corpus generator. The
+peak's location should move with all four. The mechanism (vote margin ~ `sqrt(N)`) is inferred from
+the shape of the curve rather than derived; a direct test would fix the edit size and vary the
+document length, predicting the peak moves to keep the changed-unit fraction constant.
+
+**Follow-up (PLANNED).** Repeat the sweep at several document sizes and window widths. The
+`sqrt(N)` prediction is that the optimal budget scales with document length, so the optimal
+*fraction* stays roughly constant. If the optimal fraction moves instead, the mechanism is not the
+vote margin and the absorption story needs revision.
