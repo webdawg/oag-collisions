@@ -966,3 +966,47 @@ document length, predicting the peak moves to keep the changed-unit fraction con
 `sqrt(N)` prediction is that the optimal budget scales with document length, so the optimal
 *fraction* stays roughly constant. If the optimal fraction moves instead, the mechanism is not the
 vote margin and the absorption story needs revision.
+
+---
+
+## EXP-021 — Does the optimal budget fraction stay constant?
+
+**Repository:** `oag-collisions`
+**Hypothesis.** EXP-020's mechanism is that SimHash's vote margin scales with `sqrt(N)`, so the
+optimal unit budget should scale with document length -- the optimal *fraction* should stay
+roughly constant as the document grows.
+
+**Procedure.** Find the peak detection rate and the budget at which it occurs, for documents of
+400, 800 and 1600 tokens (window 3, 2-token edit). Four seeds and an 8-token position step: the
+full sweep at 1600 tokens hashes hundreds of millions of units, and the absolute rates are not the
+finding -- the location of the peak is.
+
+**Result (RUN, `8ddc2fa`+).**
+
+| tokens | peak rate | peak budget | peak fraction |
+|---|---|---|---|
+| 400 | 94.5% | 141 | 35.2% |
+| 800 | 88.2% | 281 | 35.1% |
+| 1600 | 68.0% | 401 | 25.1% |
+
+**The prediction survives one doubling and breaks at the next.** From 400 to 800 tokens the peak
+fraction is essentially identical (35.2% vs 35.1%) and the peak budget doubles (141 → 281), which
+is exactly what a `sqrt(N)`-driven optimum should do. At 1600 tokens the fraction falls to 25.1%
+and the peak rate drops from 88.2% to 68.0%.
+
+**Conclusion.** The optimal fraction is not constant. It holds across one doubling and then falls,
+which means absorption dominates *more* at larger sizes, pushing the optimum toward hashing a
+larger share of the document -- and even at its optimum, a 1600-token document is detected less
+often than a 400-token one (68.0% vs 94.5%). So the unit budget is not a free dial: there is a
+best fraction, it drifts with document length, and beyond some length no fraction recovers the
+detection rate of a short document.
+
+**Honest limits.** The peak is located by a coarse budget sweep, so its position has a resolution
+of one step (5% of the document), and the three sizes are one corpus generator. The 400→800
+agreement could be coincidence at that resolution. The 1600 drop is large enough (35% → 25%) and
+the peak-rate drop consistent enough (88% → 68%) that the direction is probably real, but the
+exact fraction at any size should be measured, not predicted.
+
+**Follow-up (PLANNED).** Repeat at 3200 tokens. If the fraction continues to fall, the optimum is
+drifting toward "hash everything" and the absorption story needs a second term; if it returns to
+35%, the 1600 point is an artefact of the coarse sweep and the constant-fraction model holds.
