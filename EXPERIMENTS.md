@@ -994,7 +994,11 @@ fraction is essentially identical (35.2% vs 35.1%) and the peak budget doubles (
 is exactly what a `sqrt(N)`-driven optimum should do. At 1600 tokens the fraction falls to 25.1%
 and the peak rate drops from 88.2% to 68.0%.
 
-**Conclusion.** The optimal fraction is not constant. It holds across one doubling and then falls,
+**Conclusion -- WITHDRAWN by EXP-022.** This read the 400->800 agreement as confirmation and the 1600
+drop as the optimum drifting toward hashing more. EXP-022 re-ran the sweep on a coarser budget
+grid and the 1600 peak moved from 25.1% to 49.9%: the peak is an artefact of the budget grid,
+not a property of the document. The conclusion below is retained as the reasoning that was
+followed, but it is not supported by the measurement.
 which means absorption dominates *more* at larger sizes, pushing the optimum toward hashing a
 larger share of the document -- and even at its optimum, a 1600-token document is detected less
 often than a 400-token one (68.0% vs 94.5%). So the unit budget is not a free dial: there is a
@@ -1010,3 +1014,53 @@ exact fraction at any size should be measured, not predicted.
 **Follow-up (PLANNED).** Repeat at 3200 tokens. If the fraction continues to fall, the optimum is
 drifting toward "hash everything" and the absorption story needs a second term; if it returns to
 35%, the 1600 point is an artefact of the coarse sweep and the constant-fraction model holds.
+
+
+---
+
+## EXP-022 — The optimal budget fraction is not resolvable at this sweep resolution
+
+**Repository:** `oag-collisions`
+**Hypothesis.** EXP-021 concluded that the optimal unit-budget fraction is not constant: it holds
+from 400 to 800 tokens (35.2% vs 35.1%) and falls to 25.1% at 1600. This re-runs the same sweep
+on a coarser budget grid to check that the 1600 drop is a property of the document and not of
+the sampling.
+
+**Procedure.** Same document/edit/window, but the budget list is 12 values instead of 20, the
+position step is 16 tokens instead of 8, and 2 seeds instead of 4. Sizes 800, 1600, 3200.
+
+**Result (RUN, `31bac62`+).**
+
+| tokens | peak rate | peak budget | peak fraction |
+|---|---|---|---|
+| 800 | 87.0% | 265 | 33.1% |
+| 1600 | 95.0% | 799 | **49.9%** |
+| 3200 | 76.0% | 1331 | 41.6% |
+
+**The 1600 peak moved from 25.1% to 49.9% when the budget grid changed.** That is a 25-point
+swing from the sampling, against a ~2-point run-to-run reproducibility at 800 tokens (33.1% here
+vs 35.1% in EXP-021). The peak's location is dominated by which budgets happen to be sampled, not
+by the document.
+
+**Conclusion: EXP-021 is withdrawn.** Neither the "constant fraction" reading nor the "drifting
+toward hashing everything" reading is supported -- the curve is jagged enough that the peak is a
+property of the measurement grid. The three sizes now read 33.1%, 49.9%, 41.6%, which is no trend
+at all.
+
+**What this means for the layer.** The unit budget's optimum is **not a stable quantity that can
+be specified as a constant fraction**. Any deployment must measure it against its own documents
+and edit model, and should expect the peak to be broad and its exact position to depend on how
+finely the budget is swept. The practical guidance is unchanged but weaker: a budget in the
+25-50% range is defensible, a specific fraction is not.
+
+**Honest limits.** The coarser grid is what introduced the instability, so the two sweeps are not
+directly comparable; a finer grid at 3200 tokens was too slow to run here. The underlying rate
+curves are jagged because the detection event is a single bit flip in a 200-unit vote -- one
+changed unit rarely crosses a bit's margin, so the rate is a step function of which units the
+budget happens to include.
+
+**Follow-up (PLANNED).** The honest measurement is not a peak over a budget grid but the
+**distribution** of detection outcomes over many (budget, position, seed) triples at a fixed size,
+reported as a histogram rather than a single rate. That would show whether the jaggedness is a few
+outlier budgets or the normal case, and would give a deployment a real expectation rather than a
+peak to chase.

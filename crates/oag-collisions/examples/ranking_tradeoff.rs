@@ -545,6 +545,67 @@ fn main() {
     println!("grows. If the peak fraction falls, coverage is dominating at large sizes and the optimum");
     println!("is drifting toward hashing everything; if it rises, absorption is.");
 
+    // EXP-022: the 1600 point fell to 25% from 35%, which is a big drop. Either absorption
+    // dominates more at larger sizes, or the coarse sweep missed the peak. 3200 discriminates:
+    // if the fraction keeps falling, the optimum is drifting toward hashing everything; if it
+    // returns to ~35%, the 1600 point is an artefact of the sweep resolution.
+    println!();
+    println!("3200 tokens -- does the optimum keep drifting toward hashing everything?");
+    println!("===============================================================");
+    println!(
+        "{:>8} {:>10} {:>12} {:>14}",
+        "tokens", "peak rate", "peak budget", "peak fraction"
+    );
+    for tokens in [800_usize, 1600, 3200] {
+        let flat: Vec<String> = (0..tokens).map(|i| format!("w{i}")).collect();
+        // Coarser for the large sizes: the peak's *position* is the finding, and a
+        // 12-value sweep locates it well enough to see whether it is drifting.
+        let step = (tokens / 12).max(1);
+        let budgets: Vec<usize> = (1..=tokens / 2).step_by(step).collect();
+        let mut best_rate = 0.0_f64;
+        let mut best_budget = 0_usize;
+        for budget in &budgets {
+            let mut detected = 0_usize;
+            let mut trials = 0_usize;
+            for offset in (0..tokens - 2).step_by(16) {
+                for seed in 0..2_u64 {
+                    let mut changed = flat.clone();
+                    let mut rng = Lcg(0x5EED + seed * 7919);
+                    changed[offset] = format!("x{}", rng.next() % 1_000_000);
+                    changed[offset + 1] = format!("x{}", rng.next() % 1_000_000);
+                    let base_units = Tokenizer::WordsWindowBudget { window: 3, target_units: *budget }
+                        .tokenize(&flat.join(" "));
+                    let base_refs: Vec<(&str, i32)> =
+                        base_units.iter().map(|(u, w)| (u.as_str(), *w)).collect();
+                    let units = Tokenizer::WordsWindowBudget { window: 3, target_units: *budget }
+                        .tokenize(&changed.join(" "));
+                    let refs: Vec<(&str, i32)> =
+                        units.iter().map(|(u, w)| (u.as_str(), *w)).collect();
+                    if (simhash_weighted(&base_refs) ^ simhash_weighted(&refs)).count_ones() > 0 {
+                        detected += 1;
+                    }
+                    trials += 1;
+                }
+            }
+            let rate = detected as f64 / trials as f64;
+            if rate > best_rate {
+                best_rate = rate;
+                best_budget = *budget;
+            }
+        }
+        println!(
+            "{:>8} {:>9.1}% {:>12} {:>13.1}%",
+            tokens,
+            100.0 * best_rate,
+            best_budget,
+            100.0 * best_budget as f64 / tokens as f64
+        );
+    }
+    println!();
+    println!("if the 3200 fraction returns to ~35%, the 1600 drop was sweep resolution; if it keeps");
+    println!("falling, the optimum is drifting toward hashing everything and the constant-fraction");
+    println!("model is wrong.");
+
     println!();
     println!("read this as: a setting whose mean margin is positive across most corpora is doing the");
     println!("right thing for a reason. One that hovers around zero with a large standard deviation is");
