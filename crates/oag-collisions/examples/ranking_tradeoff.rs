@@ -122,6 +122,24 @@ fn measure_with_tokenizer(
     (rank == Some(1), top_tied, rank, index.bucket_entries())
 }
 
+/// Wilson score interval for a binomial proportion. Used instead of a normal
+/// approximation because the rates here are near 0% and 100%, where the normal
+/// interval is undefined and the Wilson interval is not.
+fn wilson(hits: usize, n: usize, z: f64) -> (f64, f64) {
+    if n == 0 {
+        return (0.0, 0.0);
+    }
+    let n = n as f64;
+    let p = hits as f64 / n;
+    let z2 = z * z;
+    let denom = 1.0 + z2 / n;
+    let centre = (p + z2 / (2.0 * n)) / denom;
+    let variance = p * (1.0 - p) / n;
+    let correction = z2 / (4.0 * n * n);
+    let half = (z / denom) * (variance + correction).sqrt();
+    (100.0 * (centre - half), 100.0 * (centre + half))
+}
+
 fn main() {
     println!("ranking trade-off: prefix levels vs quality vs size");
     println!("===================================================");
@@ -674,16 +692,20 @@ fn main() {
         }
     }
     println!(
-        "{:>12} {:>14} {:>14} {:>14}",
-        "scheme", "detected", "missed", "rate"
+        "{:>8} {:>10} {:>10} {:>9} {:>19}",
+        "scheme", "detected", "missed", "rate", "95% CI"
     );
     for (name, hits) in [("stride", counts[0]), ("shuffle", counts[1]), ("windows", counts[2])] {
+        let rate = 100.0 * hits as f64 / trials as f64;
+        let (lo, hi) = wilson(hits, trials, 1.96);
         println!(
-            "{:>12} {:>14} {:>14} {:>13.1}%",
+            "{:>8} {:>10} {:>10} {:>8.1}% {:>8.1}%-{:>5.1}%",
             name,
             hits,
             trials - hits,
-            100.0 * hits as f64 / trials as f64
+            rate,
+            lo,
+            hi
         );
     }
     println!();
@@ -733,10 +755,16 @@ fn main() {
         );
     }
     println!();
-    println!("the stride's rate should be near 50% -- it samples every fourth position, so an edit");
-    println!("starting on a sampled position is caught and one starting between is not. The shuffle");
-    println!("and windows should be near 100%. The gap between them is the variance-versus-granularity");
-    println!("trade, now measured rather than asserted.");
+    println!("the stride samples every fourth position, so it should catch an edit only when the edit");
+    println!("lands in a sampled window; measured 35.4%. The shuffle samples the same count at random");
+    println!("positions and measures 40.6% -- better, because random placement has no periodic blind");
+    println!("spot, but only slightly, because with 200 of 800 positions covered the edit usually");
+    println!("falls between samples either way. The window scheme samples contiguous runs and measures");
+    println!("86.5%. The intervals separate all three -- 33.8-37.1, 38.9-42.3, 85.3-87.7, none");
+    println!("overlapping -- so windows > shuffle > stride is real. But the middle gap is five");
+    println!("points, not the large one a pure coverage argument predicts: the shuffled sample's");
+    println!("clustering leaves some regions entirely unsampled, which is exactly what the stride's");
+    println!("regularity avoids.");
 
     // EXP-012 located the binding constraint at the unit count, and the EXP-007 surface says a
     // 2-token edit is comfortably visible at 50-100 units (~4-6 bits) but marginal at 200. Repeat
