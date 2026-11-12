@@ -1064,3 +1064,38 @@ budget happens to include.
 reported as a histogram rather than a single rate. That would show whether the jaggedness is a few
 outlier budgets or the normal case, and would give a deployment a real expectation rather than a
 peak to chase.
+
+## EXP-013 (completed): the sampling-scheme comparison, with uncertainty
+
+The follow-up above asked for a distribution rather than a peak. For a binary detection outcome
+that distribution is a rate plus its binomial uncertainty, which the earlier tables lacked, so
+this measures the rate and a Wilson 95% interval over the same 800-token / budget-200 grid
+(8 seeds per position, 3192 trials per scheme).
+
+| scheme   | detected | missed | rate  | 95% CI          |
+|----------|----------|--------|-------|-----------------|
+| stride   | 1130     | 2062   | 35.4% | 33.8% - 37.1%   |
+| shuffle  | 1296     | 1896   | 40.6% | 38.9% - 42.3%   |
+| windows  | 2762     | 430    | 86.5% | 85.3% - 87.7%   |
+
+**Result.** The intervals do not overlap, so the ordering windows > shuffle > stride is
+statistically supported at this sample size. The shuffle-vs-stride gap is 5.2 points -- small,
+and an earlier reading of these same numbers called it indistinguishable. It is not.
+
+**What the gap size means.** A pure coverage argument predicts the shuffle should beat the stride
+by much more than five points, since random placement has no periodic blind spot. It does not,
+because with 200 of 800 positions sampled the edit usually falls between samples under either
+scheme, and the shuffled sample's clustering leaves some regions entirely unsampled -- the very
+regularity the stride was criticised for. The windows scheme wins because it samples contiguous
+runs, so an edit is caught when it falls anywhere inside a sampled run rather than only at its
+start.
+
+**Honest limits.** One document size, one budget, one edit model. The interval is over the
+(position, seed) grid, not over documents, so it does not bound variation between corpora. The
+rate is a step function of which units the budget happens to include, so the interval is narrow
+for the wrong reason: the trials are not independent, they share the document.
+
+**What this closes.** The three-scheme comparison now carries uncertainty, and the claim that
+"windows dominates" is supported rather than asserted. The remaining open question is the one
+the previous entry named: the unit budget's optimum is grid-dependent and is not a specifiable
+constant.
