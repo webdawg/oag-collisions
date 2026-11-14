@@ -39,6 +39,28 @@ fn document(tokens: usize) -> Vec<String> {
     (0..tokens).map(|i| format!("w{i}")).collect()
 }
 
+/// A deterministic, uniformly spread sample of edit positions in `[0, limit)`.
+///
+/// A systematic step is the wrong tool here: the window stride is `ceil(798 / budget)`, and any
+/// step sharing a factor with it samples only some residues of the coverage pattern. The first
+/// version of this example stepped by 16 (the stride at budget 50) and reported 99.8% detection
+/// -- the coverage of window *starts*. A step of 7 fixed that for budgets 10-50 and 70-110 but
+/// shared a factor with the strides at budgets 60, 120 and 130, re-introducing the same artifact
+/// at those points. A pseudo-random sample has no such resonance with any stride.
+fn sample_positions(count: usize, limit: usize, seed: u64) -> Vec<usize> {
+    let mut rng = Lcg(seed);
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(count);
+    while out.len() < count {
+        let position = (rng.next() % limit as u64) as usize;
+        if seen.insert(position) {
+            out.push(position);
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
 /// Wilson score interval for a binomial proportion, in percentage points. Used instead of a normal
 /// approximation because the rate is often near 0 or 1, where the normal interval is undefined.
 fn wilson(hits: usize, n: usize, z: f64) -> (f64, f64) {
@@ -68,6 +90,14 @@ fn bits_moved_from(base_refs: &[(&str, i32)], flat: &[String], offset: usize, bu
     let units = tokenizer.tokenize(&changed.join(" "));
     let refs: Vec<(&str, i32)> = units.iter().map(|(u, w)| (u.as_str(), *w)).collect();
     (simhash_weighted(base_refs) ^ simhash_weighted(&refs)).count_ones()
+}
+
+/// The window stride the tokenizer uses for `budget` units over a `tokens`-token document:
+/// `ceil((tokens - window + 1) / budget)`. The window is width 3, so the unit count is
+/// `tokens - 2`. This is the quantity the detection rate actually depends on -- see panel 1b.
+fn window_stride(tokens: usize, budget: usize) -> usize {
+    let units = tokens.saturating_sub(2).max(1);
+    units.div_ceil(budget.max(1)).max(1)
 }
 
 /// One budget's whole distribution: how many trials moved 0 bits, 1-2, 3-5, 6-10, or 11+.
@@ -120,18 +150,15 @@ fn main() {
     // unresolvable, so the point here is a grid fine enough to see the shape.
     let budgets: Vec<usize> = (10..=200).step_by(10).collect();
     let seeds = 5_u64;
-    // The position step must be coprime with the window stride, or the sample lands only on
-    // sampled-window starts. The stride is `ceil(798 / budget)` -- 16 at budget 50, 8 at 100,
-    // 4 at 200 -- so a step of 7 spreads the sample across every residue of every stride. A step
-    // of 16 (the first version of this example) measured 99.8% at budget 50 purely because every
-    // tested position was a sampled window's start; that was a sampling artifact, not a result.
-    let position_step = 7_usize;
-    let positions: Vec<usize> = (0..tokens - 2).step_by(position_step).collect();
+    // A pseudo-random position sample, not a systematic step: see `sample_positions` for why a
+    // step resonates with the window stride. The same positions are used at every budget, so the
+    // budgets are compared on identical evidence.
+    let positions: Vec<usize> = sample_positions(100, tokens - 2, 0x5EED);
 
     println!("EXP-023: detection as a distribution, not a peak");
     println!("================================================");
     println!(
-        "document {tokens} tokens, 2-token edit, window 3, {} positions x {seeds} seeds = {} trials per budget",
+        "document {tokens} tokens, 2-token edit, window 3, {} random positions x {seeds} seeds = {} trials per budget",
         positions.len(),
         positions.len() * seeds as usize
     );
@@ -139,8 +166,8 @@ fn main() {
     println!("panel 1: the rate over a fine budget grid, with its Wilson 95% interval");
     println!("========================================================================");
     println!(
-        "{:>8} {:>10} {:>10} {:>9} {:>18}",
-        "budget", "detected", "missed", "rate", "95% CI"
+        "{:>8} {:>6} {:>10} {:>10} {:>9} {:>18}",
+        "budget", "stride", "detected", "missed", "rate", "95% CI"
     );
 
     let mut rates = Vec::new();
@@ -159,11 +186,13 @@ fn main() {
         let total = histogram.total();
         let (lo, hi) = wilson(detected, total, 1.96);
         let rate = 100.0 * detected as f64 / total as f64;
+        let stride = window_stride(tokens, *budget);
         rates.push(((*budget, rate), (lo, hi)));
         histograms.push((*budget, histogram));
         println!(
-            "{:>8} {:>10} {:>10} {:>8.1}% {:>8.1}%-{:>5.1}%",
+            "{:>8} {:>6} {:>10} {:>10} {:>8.1}% {:>8.1}%-{:>5.1}%",
             budget,
+            stride,
             detected,
             total - detected,
             rate,
@@ -171,6 +200,40 @@ fn main() {
             hi
         );
     }
+
+    // The stride is `ceil(units / budget)`, and the units are `tokens - window + 1` -- so the
+    // stride is a pure function of the budget. If the detection rate depends only on the stride,
+    // budgets sharing one must give the same rate, and the curve is a step function rather than a
+    // smooth one. Group them and look.
+    println!();
+    println!("panel 1b: budgets grouped by stride");
+    println!("====================================");
+    println!("{:>8} {:>10} {:>10} {:>8}", "stride", "budgets", "rate", "spread");
+    let mut by_stride: Vec<(usize, Vec<(usize, f64)>)> = Vec::new();
+    for ((budget, rate), _ci) in &rates {
+        let stride = window_stride(tokens, *budget);
+        match by_stride.iter_mut().find(|(s, _)| *s == stride) {
+            Some((_, list)) => list.push((*budget, *rate)),
+            None => by_stride.push((stride, vec![(*budget, *rate)])),
+        }
+    }
+    for (stride, list) in &by_stride {
+        let rates: Vec<f64> = list.iter().map(|(_, r)| *r).collect();
+        let mean = rates.iter().sum::<f64>() / rates.len() as f64;
+        let spread = rates.iter().copied().fold(0.0_f64, f64::max)
+            - rates.iter().copied().fold(f64::MAX, f64::min);
+        let budgets: Vec<String> = list.iter().map(|(b, _)| b.to_string()).collect();
+        println!(
+            "{:>8} {:>10} {:>9.1}% {:>7.1}",
+            stride,
+            budgets.join(","),
+            mean,
+            spread
+        );
+    }
+    println!();
+    println!("a spread of 0 within a stride means the rate is a function of the stride alone --");
+    println!("the budget grid is measuring the stride, and the \"jaggedness\" is the step.");
 
     // Is the jaggedness a few outlier budgets or the normal case? Measure the local variation:
     // how much does the rate change between adjacent budgets, and how often is that change larger
@@ -231,15 +294,20 @@ fn main() {
     // Panel 3: the same distribution with the budget axis collapsed -- is the miss rate uniform
     // across the document, or concentrated? A window sample covers the whole document, so a
     // concentrated miss rate would mean the scheme has a positional blind spot after all.
+    //
+    // The decisive question is not "how spread out are the misses" but "do they land on a
+    // repeating pattern". Group positions by their residue modulo the stride: a periodic blind
+    // spot shows up as residues with a 100% miss rate and others with 0%.
     println!();
-    println!("panel 3: where the misses fall");
-    println!("=============================");
-    println!("each cell is the miss rate over {seeds} seeds at that position, budget 100");
+    println!("panel 3: the miss rate by position modulo the stride");
+    println!("======================================================");
     let budget = 100_usize;
+    let stride = window_stride(tokens, budget);
+    println!("budget {budget}, stride {stride}, window 3: sampled windows start at 0, {stride}, {}", 2 * stride);
     let tokenizer = Tokenizer::WordsWindowBudget { window: 3, target_units: budget };
     let base_units = tokenizer.tokenize(&flat.join(" "));
     let base_refs: Vec<(&str, i32)> = base_units.iter().map(|(u, w)| (u.as_str(), *w)).collect();
-    let mut misses = Vec::new();
+    let mut by_residue: Vec<(usize, usize, usize)> = vec![(0, 0, 0); stride];
     for &offset in &positions {
         let mut missed = 0;
         for seed in 0..seeds {
@@ -247,34 +315,32 @@ fn main() {
                 missed += 1;
             }
         }
-        misses.push(missed as f64 / seeds as f64);
+        let residue = offset % stride;
+        by_residue[residue].0 += missed;
+        by_residue[residue].1 += seeds as usize;
+        by_residue[residue].2 += 1;
     }
-    let mean_miss = misses.iter().sum::<f64>() / misses.len() as f64;
-    let max_miss = misses.iter().copied().fold(0.0_f64, f64::max);
-    let min_miss = misses.iter().copied().fold(1.0_f64, f64::min);
-    println!(
-        "mean miss rate across positions: {:.1}% (min {:.1}%, max {:.1}%)",
-        100.0 * mean_miss,
-        100.0 * min_miss,
-        100.0 * max_miss
-    );
-    let variance = misses.iter().map(|r| (*r - mean_miss).powi(2)).sum::<f64>() / misses.len() as f64;
-    println!(
-        "positional variance of the miss rate: {:.4} (std dev {:.1} points)",
-        variance,
-        100.0 * variance.sqrt()
-    );
     println!();
-    println!("read the variance honestly: a *low* variance means the misses are spread evenly and the");
-    println!("rate is a property of the budget; a variance at or above the mean means the misses are");
-    println!("concentrated at particular positions, which is a positional blind spot. The figures");
-    println!("above are the measurement -- the conclusion is theirs, not this paragraph's.");
+    println!("{:>8} {:>12} {:>14} {:>12}", "residue", "miss rate", "trials", "positions");
+    for (residue, (missed, trials, count)) in by_residue.iter().enumerate() {
+        let rate = 100.0 * *missed as f64 / *trials.max(&1) as f64;
+        println!(
+            "{:>8} {:>11.1}% {:>14} {:>12}",
+            residue, rate, trials, count
+        );
+    }
     println!();
-    println!("the mechanism behind both panels: an edit is detected only if the changed unit flips");
-    println!("at least one bit's majority vote. Sampling a window is necessary but not sufficient --");
-    println!("with 200 units, one changed unit often leaves every bit's margin where it was. So the");
-    println!("rate is not the window coverage (3*budget/tokens); it is the probability that the");
-    println!("changed units cross a bit's margin, which is why it moves in steps rather than");
-    println!("tracking the budget smoothly.");
+    println!("read the residues as the coverage pattern: a sampled window at 0 covers tokens 0-2, so");
+    println!("residues 0-2 are covered and 3..stride-1 are the gap. A 2-token edit is missed when");
+    println!("both its tokens fall in the gap, so the gap residues near the start of the gap are");
+    println!("100% missed and the ones adjacent to a window are caught. That is a *periodic* blind");
+    println!("spot, and it is what EXP-016's 'no blind spot' claim missed: the claim was about");
+    println!("coverage inside a sampled window, not about the gaps between them.");
+    println!();
+    println!("the second mechanism, which the residue table averages over: an edit is detected only");
+    println!("if the changed unit flips at least one bit's majority vote. Sampling a window is");
+    println!("necessary but not sufficient -- with 200 units, one changed unit often leaves every");
+    println!("bit's margin where it was. That is why the 6-10 and 11+ columns in panel 2 are nearly");
+    println!("empty, and why a larger budget is not a comfortable margin.");
     println!();
 }

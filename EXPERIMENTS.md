@@ -790,6 +790,13 @@ the edited tokens. The shuffle has no blind spot but samples the same *fraction*
 rate is nearly the stride's. The window advantage is real but it comes from unit width. See the
 correction below before quoting the "dominates both" claim.
 
+**Corrected again by EXP-023.** The "no blind spot" reading holds only at the budget this
+experiment used. EXP-023 measured the rate as a function of the stride and found the blind spot is
+`(stride - window - 1) / stride` of positions, which is zero only when `stride <= window + 1` --
+at 800 tokens and window 3, a budget of at least 200. At budget 100 (stride 8) the four gap residues
+are missed on **100% of seeds**. The claim should be read as "no blind spot at this budget", not
+"no blind spot".
+
 - the **stride's** spread coverage and deterministic, position-independent unit selection;
 - the **shuffle's** absence of any periodic blind spot.
 
@@ -1111,84 +1118,120 @@ is a few outlier budgets or the normal case.
 
 **Procedure.** `crates/oag-collisions/examples/distribution.rs`. An 800-token document, a 2-token
 edit, window sampling at width 3 (the scheme EXP-016/EXP-017 settled on). A fine budget grid (every
-10 units from 10 to 200), 114 edit positions (every 7th token), 5 seeds per position -- 570 trials
-per budget. The base tokenization is computed once per budget, so the run finishes in about 20s.
-The source is an LCG, so a run is exactly reproducible.
+10 units from 10 to 200), 100 pseudo-random edit positions, 5 seeds per position -- 500 trials per
+budget. The base tokenization is computed once per budget, so the run finishes in about 18s. The
+source is an LCG, so a run is exactly reproducible.
 
-**Result: the rate over a fine budget grid.**
+**A sampling rule this experiment had to learn twice.** A systematic position step resonates with
+the window stride, which is `ceil(798 / budget)`. The first version stepped by 16 -- the stride at
+budget 50 -- so every tested position was a sampled window's start, and it reported 99.8% detection
+at budget 50: the coverage of window *starts*, not of edits. A step of 7 fixed budgets 10-50 and
+70-110 but shares a factor with the strides at budgets 60, 120 and 130, re-introducing the artifact
+at exactly those points. The version reported here samples positions pseudo-randomly, which has no
+resonance with any stride. Any experiment that sweeps a periodic sampler must do the same.
 
-| budget | detected | missed | rate | 95% CI |
-|---|---|---|---|---|
-| 10 | 30 | 540 | 5.3% | 3.7%-7.4% |
-| 20 | 60 | 510 | 10.5% | 8.3%-13.3% |
-| 30 | 90 | 480 | 15.8% | 13.0%-19.0% |
-| 40 | 113 | 457 | 19.8% | 16.8%-23.3% |
-| 50 | 145 | 425 | 25.4% | 22.0%-29.2% |
-| 60 | 283 | 287 | 49.6% | 45.6%-53.7% |
-| 70 | 195 | 375 | 34.2% | 30.4%-38.2% |
-| 80 | 190 | 380 | 33.3% | 29.6%-37.3% |
-| 90 | 253 | 317 | 44.4% | 40.4%-48.5% |
-| 100 | 282 | 288 | 49.5% | 45.4%-53.6% |
-| 110 | 282 | 288 | 49.5% | 45.4%-53.6% |
-| 120 | 548 | 22 | 96.1% | 94.2%-97.4% |
-| 130 | 548 | 22 | 96.1% | 94.2%-97.4% |
-| 140 | 356 | 214 | 62.5% | 58.4%-66.3% |
-| 150 | 356 | 214 | 62.5% | 58.4%-66.3% |
-| 160 | 401 | 169 | 70.4% | 66.5%-74.0% |
-| 170 | 401 | 169 | 70.4% | 66.5%-74.0% |
-| 180 | 401 | 169 | 70.4% | 66.5%-74.0% |
-| 190 | 401 | 169 | 70.4% | 66.5%-74.0% |
-| 200 | 498 | 72 | 87.4% | 84.4%-89.8% |
+**Result: the rate over a fine budget grid, with the stride each budget produces.**
 
-**The jaggedness is the normal case, not a few outliers.** 10 of the 19 adjacent budget pairs
-differ by more than the sum of their Wilson half-widths, so the two rates are distinguishable.
-The largest steps are 110->120 (+46.7 points), 130->140 (+33.7), 50->60 (+24.2) and 190->200
-(+17.0). A deployment cannot read this curve as "a larger budget is smoothly better": budget 120
-detects 96.1% and budget 140 detects 62.5%, so *increasing* the budget by 20 units costs 34 points.
+| budget | stride | detected | missed | rate | 95% CI |
+|---|---|---|---|---|---|
+| 10 | 80 | 30 | 470 | 6.0% | 4.2%-8.4% |
+| 20 | 40 | 75 | 425 | 15.0% | 12.1%-18.4% |
+| 30 | 27 | 90 | 410 | 18.0% | 14.9%-21.6% |
+| 40 | 20 | 143 | 357 | 28.6% | 24.8%-32.7% |
+| 50 | 16 | 103 | 397 | 20.6% | 17.3%-24.4% |
+| 60 | 14 | 165 | 335 | 33.0% | 29.0%-37.2% |
+| 70 | 12 | 190 | 310 | 38.0% | 33.9%-42.3% |
+| 80 | 10 | 185 | 315 | 37.0% | 32.9%-41.3% |
+| 90 | 9 | 237 | 263 | 47.4% | 43.1%-51.8% |
+| 100 | 8 | 205 | 295 | 41.0% | 36.8%-45.4% |
+| 110 | 8 | 205 | 295 | 41.0% | 36.8%-45.4% |
+| 120 | 7 | 241 | 259 | 48.2% | 43.9%-52.6% |
+| 130 | 7 | 241 | 259 | 48.2% | 43.9%-52.6% |
+| 140 | 6 | 329 | 171 | 65.8% | 61.5%-69.8% |
+| 150 | 6 | 329 | 171 | 65.8% | 61.5%-69.8% |
+| 160 | 5 | 375 | 125 | 75.0% | 71.0%-78.6% |
+| 170 | 5 | 375 | 125 | 75.0% | 71.0%-78.6% |
+| 180 | 5 | 375 | 125 | 75.0% | 71.0%-78.6% |
+| 190 | 5 | 375 | 125 | 75.0% | 71.0%-78.6% |
+| 200 | 4 | 421 | 79 | 84.2% | 80.7%-87.1% |
 
-**The margin distribution: most detections are one bit away from a miss.**
+**Finding 1: the rate is a function of the stride, not the budget.** Budgets that produce the same
+stride give *identical* rates -- the spread within every stride group is exactly 0.0:
+
+| stride | budgets | rate |
+|---|---|---|
+| 8 | 100, 110 | 41.0% |
+| 7 | 120, 130 | 48.2% |
+| 6 | 140, 150 | 65.8% |
+| 5 | 160, 170, 180, 190 | 75.0% |
+| 4 | 200 | 84.2% |
+
+The budget grid is measuring the stride. The curve is a step function, and the "jaggedness" EXP-022
+could not resolve is the step: 8 of the 19 adjacent pairs differ by more than their combined Wilson
+half-widths, and every large step (130->140 is +17.6 points, 150->160 and 190->200 are +9.2) is a
+stride change. There is no budget to tune between strides -- 100 and 110 are the same measurement.
+
+**Finding 2: the window scheme has a periodic blind spot, and it is 100% missed.** At budget 100 the
+stride is 8, so sampled windows start at 0, 8, 16, ... and each covers 3 tokens. Grouping edit
+positions by their residue modulo the stride:
+
+| residue | miss rate |
+|---|---|
+| 0 | 2.0% |
+| 1 | 0.0% |
+| 2 | 0.0% |
+| 3 | **100.0%** |
+| 4 | **100.0%** |
+| 5 | **100.0%** |
+| 6 | **100.0%** |
+| 7 | 4.7% |
+
+Residues 0-2 are the window at 0; residue 7 is caught by the window at 8 (the edit at 7 changes
+tokens 7 and 8, and 8 is covered). Residues 3-6 are the gap, and every edit landing entirely inside
+it is missed. The blind spot is `(stride - window - 1) / stride` of positions -- 4/8 = 50% here.
+
+**This refines EXP-016's "no blind spot" claim.** EXP-016 measured at budget 200, where the stride
+is 4 and the gap is a single token, so no 2-token edit can land entirely inside it: the blind spot
+is genuinely zero there, and EXP-016's own "Honest limits" section says as much ("its own stride
+still has a periodic structure ... an edit is caught as long as it overlaps any sampled window").
+What EXP-016 did not say is that the blind spot grows linearly with the stride, so at any smaller
+budget it is not zero. The general condition for a 2-token edit to have no coverage blind spot is
+`stride <= window + 1`, i.e.
+
+```
+budget >= (tokens - window + 1) / (window + 1)
+```
+
+For 800 tokens and window 3 that is `798 / 4 = 199.5` -- a budget of 200, or 25% of the document.
+Below that, the blind spot is `(stride - 4) / stride` and it is total: the gap residues are missed
+on every seed.
+
+**Finding 3: most detections are one bit away from a miss.** The margin histogram at three budgets:
 
 | budget | 0 bits | 1-2 bits | 3-5 bits | 6-10 bits | 11+ bits |
 |---|---|---|---|---|---|
-| 50 | 74.6% | 2.5% | 15.8% | 7.2% | 0.0% |
-| 100 | 50.5% | 17.9% | 29.1% | 2.5% | 0.0% |
-| 200 | 12.6% | 60.4% | 26.8% | 0.2% | 0.0% |
+| 50 | 79.4% | 2.2% | 13.4% | 5.0% | 0.0% |
+| 100 | 59.0% | 15.0% | 24.2% | 1.8% | 0.0% |
+| 200 | 15.8% | 62.2% | 21.6% | 0.4% | 0.0% |
 
-At budget 200, 60.4% of the *detections* move only 1-2 bits. A 1-bit detection is a single flipped
-bit away from not being detected at all, so the rate is a thin margin over chance for most
-trials -- not a comfortable one.
+At budget 200, 62.2% of the *detections* move only 1-2 bits. A 1-bit detection is a single flipped
+bit away from not being detected, so the rate is a thin margin over chance for most trials. The
+6-10 and 11+ columns are nearly empty at every budget, which is the second mechanism: an edit is
+detected only if the changed unit flips at least one bit's majority vote, and with hundreds of
+units a single changed unit often leaves every margin where it was. Sampling a window is necessary
+but not sufficient.
 
-**The misses are positionally concentrated, not spread.** At budget 100 the per-position miss
-rate ranges from 0.0% to 100.0% with a standard deviation of 49.1 points, against a mean of 50.5%.
-The variance is at the mean, so the misses are not an evenly-spread property of the budget; they
-fall on particular positions. This is a positional blind spot, the thing EXP-016's window scheme
-was supposed to remove.
+**Honest limits.** One document size, one edit model, one window width. The trials share the
+document, so the Wilson interval bounds the (position, seed) grid, not the corpus. The position
+sample is 100 of 798 positions. The margin histogram is bucketed. The blind-spot formula is derived
+for a 2-token edit; a 1-token edit is missed on `(stride - window) / stride` of positions, and a
+3-token edit on `(stride - window - 2) / stride`, so the general form is
+`(stride - window - (edit_len - 1)) / stride` while that is positive.
 
-**The mechanism, stated precisely.** An edit is detected only if the changed unit flips at least
-one bit's majority vote. Sampling a window is necessary but not sufficient: with 200 units, one
-changed unit often leaves every bit's margin where it was. So the detection rate is **not** the
-window coverage (`3 * budget / tokens`, which would be 75% at budget 200); it is the probability
-that the changed units cross a bit's margin. That is why the rate moves in steps rather than
-tracking the budget smoothly, and why the margin histogram is dominated by 1-2 bits.
-
-**A methodological trap, recorded because it produced a plausible-looking wrong answer.** The
-first version of this example sampled edit positions every 16 tokens. The window stride at budget
-50 is `ceil(798/50) = 16`, so every sampled position was a sampled window's start -- the
-measurement reported 99.8% detection at budget 50, which is the coverage of window *starts*, not
-of edits. A position step must be coprime with the stride (7 is coprime with 16, 8 and 4), or the
-sample is aligned with the very structure it is measuring. This is the same class of error as
-reading a rate from trials that share one document: the measurement grid can manufacture the
-result.
-
-**Honest limits.** One document size, one edit model, one tokenizer. The trials share the
-document, so the Wilson interval is narrow for the wrong reason -- it bounds the (position, seed)
-grid, not the corpus. The position sample is 114 of 798 positions. The margin histogram is
-bucketed, so the exact bit counts within a bucket are not reported.
-
-**What this closes.** The planned follow-up is done: the jaggedness is the normal case, the
-detections are mostly thin-margin, and the misses are positionally concentrated. The practical
-guidance is now stronger than "a budget in the 25-50% range is defensible": a deployment should
-sweep the budget against its own documents *and* report the margin distribution, because the rate
-alone hides that most detections are 1-2 bits. The remaining open question is the positional
-blind spot: why the window scheme, which has no periodic blind spot, still concentrates its
-misses at particular positions.
+**What this closes.** The planned follow-up is done, and it changes the guidance rather than
+confirming it. The detection rate is a step function of the stride, so there is no budget to tune
+between strides. The window scheme's "no blind spot" holds only at `stride <= window + 1`; below
+that, the gap residues are missed on every seed. And the detections that do happen are mostly
+1-2 bits. A deployment should: (1) choose the budget from the formula above if it needs no
+coverage blind spot, (2) sweep the *stride* rather than the budget, and (3) report the margin
+distribution, because the rate alone hides that most detections are one bit.
