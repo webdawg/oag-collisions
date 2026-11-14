@@ -78,15 +78,16 @@ fn wilson(hits: usize, n: usize, z: f64) -> (f64, f64) {
     (100.0 * (centre - half), 100.0 * (centre + half))
 }
 
-/// The bits moved by one 2-token edit at `offset`, given the base document's already-tokenized
+/// The bits moved by a `len`-token edit at `offset`, given the base document's already-tokenized
 /// units. Tokenizing the base once per budget rather than once per trial is the difference between
 /// a minute-long run and a seconds-long one.
-fn bits_moved_from(base_refs: &[(&str, i32)], flat: &[String], offset: usize, budget: usize, seed: u64) -> u32 {
+fn bits_moved_from(base_refs: &[(&str, i32)], flat: &[String], offset: usize, len: usize, budget: usize, seed: u64) -> u32 {
     let tokenizer = Tokenizer::WordsWindowBudget { window: 3, target_units: budget };
     let mut changed = flat.to_vec();
     let mut rng = Lcg(seed);
-    changed[offset] = format!("x{}", rng.next() % 1_000_000);
-    changed[offset + 1] = format!("x{}", rng.next() % 1_000_000);
+    for k in 0..len {
+        changed[offset + k] = format!("x{}", rng.next() % 1_000_000);
+    }
     let units = tokenizer.tokenize(&changed.join(" "));
     let refs: Vec<(&str, i32)> = units.iter().map(|(u, w)| (u.as_str(), *w)).collect();
     (simhash_weighted(base_refs) ^ simhash_weighted(&refs)).count_ones()
@@ -179,7 +180,7 @@ fn main() {
         let mut histogram = Histogram::default();
         for &offset in &positions {
             for seed in 0..seeds {
-                histogram.add(bits_moved_from(&base_refs, &flat, offset, *budget, 0x5EED + seed * 7919));
+                histogram.add(bits_moved_from(&base_refs, &flat, offset, 2, *budget, 0x5EED + seed * 7919));
             }
         }
         let detected = histogram.detected();
@@ -311,7 +312,7 @@ fn main() {
     for &offset in &positions {
         let mut missed = 0;
         for seed in 0..seeds {
-            if bits_moved_from(&base_refs, &flat, offset, budget, 0x5EED + seed * 7919) == 0 {
+            if bits_moved_from(&base_refs, &flat, offset, 2, budget, 0x5EED + seed * 7919) == 0 {
                 missed += 1;
             }
         }
@@ -342,5 +343,55 @@ fn main() {
     println!("necessary but not sufficient -- with 200 units, one changed unit often leaves every");
     println!("bit's margin where it was. That is why the 6-10 and 11+ columns in panel 2 are nearly");
     println!("empty, and why a larger budget is not a comfortable margin.");
+    println!();
+
+    // Panel 4: is the thin margin a property of the edit, or of the budget? The SimHash is a
+    // majority vote over `budget` units, and an edit changes only the units whose windows overlap
+    // it -- so the number of changed units, not the document, sets the margin. If that is right,
+    // the margin must grow with the edit length and be nearly flat across budgets at a fixed edit
+    // length. Measure the first half.
+    println!("panel 4: the margin as a function of edit length (budget 200, 100 positions x 5 seeds)");
+    println!("======================================================================================");
+    let budget = 200_usize;
+    let tokenizer = Tokenizer::WordsWindowBudget { window: 3, target_units: budget };
+    let base_units = tokenizer.tokenize(&flat.join(" "));
+    let base_refs: Vec<(&str, i32)> = base_units.iter().map(|(u, w)| (u.as_str(), *w)).collect();
+    println!(
+        "{:>6} {:>10} {:>11} {:>18}",
+        "edit", "detected", "mean bits", "margin buckets"
+    );
+    let mut max_len = 0;
+    for len in [1_usize, 2, 4, 8, 16] {
+        max_len = max_len.max(len);
+        let mut histogram = Histogram::default();
+        let mut total_bits = 0_u64;
+        let mut trials = 0_u64;
+        for &offset in positions.iter().filter(|&&p| p + len < tokens) {
+            for seed in 0..seeds {
+                let bits = bits_moved_from(&base_refs, &flat, offset, len, budget, 0x5EED + seed * 7919);
+                histogram.add(bits);
+                total_bits += bits as u64;
+                trials += 1;
+            }
+        }
+        println!(
+            "{:>6} {:>9.1}% {:>11.2}   {:>5.1}% {:>5.1}% {:>5.1}% {:>5.1}% {:>5.1}%",
+            len,
+            100.0 * histogram.detected() as f64 / trials as f64,
+            total_bits as f64 / trials as f64,
+            100.0 * histogram.zero as f64 / trials as f64,
+            100.0 * histogram.one_two as f64 / trials as f64,
+            100.0 * histogram.three_five as f64 / trials as f64,
+            100.0 * histogram.six_ten as f64 / trials as f64,
+            100.0 * histogram.eleven_plus as f64 / trials as f64,
+        );
+    }
+    println!();
+    println!("read this as: the margin is a function of the edit, not the budget. A 1-token edit moves");
+    println!("about 1 bit and a 16-token edit about 4 -- the 11+ bucket is unreachable for any edit");
+    println!("that leaves most of the document alone, because the hash is a majority vote over the");
+    println!("whole unit budget and a small edit crosses few margins. The detection rate saturates");
+    println!("near 100% while the margin stays thin, so a high rate does not mean a confident one.");
+    let _ = max_len;
     println!();
 }

@@ -1221,6 +1221,32 @@ detected only if the changed unit flips at least one bit's majority vote, and wi
 units a single changed unit often leaves every margin where it was. Sampling a window is necessary
 but not sufficient.
 
+**Finding 4: the margin is a function of the edit, not the budget.** If the thin margin were a
+budget problem, a larger budget would thicken it. It does not. At a fixed budget of 200, varying
+the edit length:
+
+| edit | detected | mean bits moved | 0 | 1-2 | 3-5 | 6-10 | 11+ |
+|---|---|---|---|---|---|---|---|
+| 1 token | 56.8% | 1.12 | 43.2% | 42.4% | 14.4% | 0.0% | 0.0% |
+| 2 tokens | 84.2% | 1.68 | 15.8% | 62.2% | 21.6% | 0.4% | 0.0% |
+| 4 tokens | 89.6% | 2.13 | 10.4% | 51.8% | 37.2% | 0.6% | 0.0% |
+| 8 tokens | 96.4% | 3.12 | 3.6% | 35.2% | 52.6% | 8.6% | 0.0% |
+| 16 tokens | 99.2% | 4.06 | 0.8% | 17.0% | 62.6% | 19.4% | 0.2% |
+
+The margin grows with the number of changed units, and even a 16-token edit out of 800 moves only
+about 4 bits. The 11+ bucket is essentially unreachable for any edit that leaves most of the
+document alone. The mechanism is the one stated above: the hash is a majority vote over the whole
+unit budget, and an edit crosses only the margins of the units whose windows it overlaps. So a
+small edit crosses few margins and a large edit crosses more, but neither can move the hash far
+without changing a large fraction of the document.
+
+**The consequence for a deployment, stated plainly: a high detection rate does not mean a
+confident detection.** At a 2-token edit the index detects 84% of edits and the mean detection is
+1.68 bits; at a 16-token edit it detects 99% and the mean is still only 4 bits. The rate saturates
+long before the margin does. Any consumer of this layer that treats "detected" as "these documents
+differ" is reading a 1-bit signal at the common edit size, and should report the margin alongside
+the rate -- which is the same conclusion panel 2 reached from the other direction.
+
 **Honest limits.** One document size, one edit model, one window width. The trials share the
 document, so the Wilson interval bounds the (position, seed) grid, not the corpus. The position
 sample is 100 of 798 positions. The margin histogram is bucketed. The blind-spot formula is derived
@@ -1231,7 +1257,14 @@ for a 2-token edit; a 1-token edit is missed on `(stride - window) / stride` of 
 **What this closes.** The planned follow-up is done, and it changes the guidance rather than
 confirming it. The detection rate is a step function of the stride, so there is no budget to tune
 between strides. The window scheme's "no blind spot" holds only at `stride <= window + 1`; below
-that, the gap residues are missed on every seed. And the detections that do happen are mostly
-1-2 bits. A deployment should: (1) choose the budget from the formula above if it needs no
-coverage blind spot, (2) sweep the *stride* rather than the budget, and (3) report the margin
-distribution, because the rate alone hides that most detections are one bit.
+that, the gap residues are missed on every seed. The detections that do happen are mostly 1-2
+bits, and the margin is set by the edit rather than the budget. A deployment should: (1) choose
+the budget from the formula above if it needs no coverage blind spot, (2) sweep the *stride* rather
+than the budget, and (3) report the margin alongside the rate, because a high rate does not mean a
+confident detection.
+
+**Remaining open.** The margin mechanism is now described and measured, but the *ranking*
+consequence is not: if a detection is 1-2 bits, the longest-shared-prefix rank is 62-63 bits, and
+whether that is enough to order two near-duplicates at different distances is the question EXP-004
+raised and EXP-023 does not answer. The margin measurement and the ranking measurement have not
+been joined.
