@@ -1268,3 +1268,81 @@ consequence is not: if a detection is 1-2 bits, the longest-shared-prefix rank i
 whether that is enough to order two near-duplicates at different distances is the question EXP-004
 raised and EXP-023 does not answer. The margin measurement and the ranking measurement have not
 been joined.
+
+## EXP-024 — The index ranks by a weaker signal than it stores
+
+**Repository:** `oag-collisions`
+**Hypothesis.** EXP-023 established that a detection is 1-2 bits at the common 2-token edit and left
+one question open: is that enough for the index to *rank* near-duplicates at different distances?
+The question hides a distinction the earlier experiments did not draw.
+
+**The distinction.** The index ranks by **longest shared prefix** -- the position of the *first*
+differing bit. EXP-023 measured **Hamming distance** -- the *number* of differing bits. A variant
+one bit away at the most significant position shares no prefix at all; a variant one bit away at
+the least significant position shares 63. The two signals are not the same, and the index was using
+the weaker one.
+
+**Procedure.** `crates/oag-collisions/examples/ranking_margin.rs`. An 800-token document, window
+sampling at width 3 with a budget of 200, and 20 variants at each edit distance from 2 to 256
+tokens. For every variant: the Hamming distance from the query's hash, the longest shared prefix,
+and the index's rank. The source is an LCG, so a run is exactly reproducible.
+
+**Result 1: the two signals track the edit distance very differently.**
+
+| signal | Spearman correlation with edit distance |
+|---|---|
+| Hamming distance | **+0.916** |
+| shared prefix (what the index ranks by) | **-0.443** |
+
+The Hamming distance is a strong proxy for the edit size. The shared prefix -- the signal the index
+actually ranks by -- is a weak one. The index was ranking on the weaker of the two signals it had.
+
+**Result 2: the prefix ordering inverts 22.3% of comparable pairs.** Over all 10,409 comparable
+pairs of variants, 2,322 are ordered backwards by the prefix ranking relative to the Hamming
+ranking: the document with more bits moved ranks above the one with fewer. Among the 62 candidates
+the prefix filter admits, the rate is 29.7% (479 of 1,613 pairs). The Hamming ordering inverts 0%,
+by construction.
+
+**Result 3: the candidate set is the recall limit, and it is aggressive.** Only 62 of 160 variants
+are candidates. The rate falls with the edit distance:
+
+| edit distance | candidates | of |
+|---|---|---|
+| 2 | 14 | 20 |
+| 4 | 14 | 20 |
+| 8 | 12 | 20 |
+| 16 | 10 | 20 |
+| 32 | 4 | 20 |
+| 64 | 4 | 20 |
+| 128 | 3 | 20 |
+| 256 | 1 | 20 |
+
+An item whose first differing bit is above bit 8 is invisible at every prefix level, however few
+bits moved. So the prefix filter trades recall for speed, and the trade is steepest exactly where
+the inference matters most -- the far near-duplicates.
+
+**The fix.** `CollisionIndex::collide_by_hamming` (and `collide_by_hamming_text`) re-ranks the
+candidates by Hamming distance between the full hashes. The index already stores every item's full
+hash (`hashes`) and already holds the candidate set in memory, so the re-rank is `O(candidates)`
+with no extra asymptotic cost and no extra memory. `Collision` now carries a `hamming` field
+alongside `shared_bits`, so a caller can see both signals. The candidate set is unchanged: the
+prefix buckets still decide which items are found, and the re-rank cannot recover an item the
+filter excluded.
+
+**Result 4: the top-1 improves.** On this corpus the prefix ranking's top-1 is a 4-token edit; the
+Hamming ranking's top-1 is a 2-token edit, which is the closest detectable document. The top-1 is
+one draw, not a rate -- but it is the draw the correlation predicts, and the correlation is the
+finding.
+
+**Honest limits.** One document size, one edit model, one window width, one corpus. The Spearman
+coefficients are over 160 synthetic variants that share one base document, so they bound this
+corpus, not all corpora. The re-rank is measured against the Hamming ordering, which is itself a
+proxy for the edit distance (+0.916, not +1.0). The recall limit of the prefix filter is described,
+not fixed: closing it would require scanning every item, which is the cost the index exists to
+avoid.
+
+**What this closes.** The open question from EXP-023 is answered: the thin margin does not limit
+the ranking directly, because the ranking does not use the margin. It uses the first differing bit,
+which is a weaker signal than the total bits moved -- and the total bits moved was already stored
+and unused. The ranking signal is now the stronger of the two, at no cost. What remains open is the
+recall limit of the prefix filter, which no re-rank can touch.

@@ -13,6 +13,13 @@ Locality-sensitive hashing. Inputs are hashed so that *similar* inputs are more 
 and every prefix of every hash is indexed. A query collides partially with everything already
 indexed, and the longest shared prefix ranks the result.
 
+The prefix is the *filter*; it decides which items are found. It is a weak *ranking* signal -- it
+is the position of the first differing bit, not how many bits differ. `collide_by_hamming` re-ranks
+the same candidates by the full-hash Hamming distance, which tracks the edit size far better
+(Spearman +0.916 against the edit distance, versus -0.443 for the shared prefix) and eliminates the
+22.3% of pairs the prefix ordering gets backwards. The index already stores every item's full
+hash, so the re-rank costs nothing asymptotically. See `EXPERIMENTS.md` EXP-024.
+
 ```
 "the rust async runtime provides scheduled task execution"
 "the rust async runtime provides scheduled task execution, and is fast"

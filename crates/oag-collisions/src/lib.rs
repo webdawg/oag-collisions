@@ -361,6 +361,14 @@ pub struct Collision<'a> {
     pub id: &'a str,
     /// Shared prefix length in bits. Longer means a stronger inference.
     pub shared_bits: u32,
+    /// Hamming distance between the query's full hash and the item's full hash. Smaller means a
+    /// stronger inference.
+    ///
+    /// This is the signal a linear scan would use; `shared_bits` is the one the prefix buckets
+    /// produce. The two are not the same: a variant one bit away at the most significant position
+    /// shares nothing, while a variant one bit away at the least significant position shares 63
+    /// bits. `examples/ranking_margin.rs` measures how often the two orderings disagree.
+    pub hamming: u32,
 }
 
 /// An index where every item is stored under every prefix of its hash.
@@ -563,10 +571,50 @@ impl CollisionIndex {
         }
         let mut results: Vec<Collision<'_>> = best
             .into_iter()
-            .map(|(id, shared_bits)| Collision { id, shared_bits })
+            .map(|(id, shared_bits)| Collision {
+                id,
+                shared_bits,
+                hamming: self
+                    .hashes
+                    .get(id)
+                    .map(|item| (hash ^ item).count_ones())
+                    .unwrap_or(u32::MAX),
+            })
             .collect();
         results.sort_by(|a, b| b.shared_bits.cmp(&a.shared_bits));
         results
+    }
+
+    /// Like [`CollisionIndex::collide`], but ranks the candidates by Hamming distance between the
+    /// full hashes rather than by the longest shared prefix.
+    ///
+    /// The prefix buckets find the candidates; the full hashes order them. This is the standard
+    /// LSH refinement, and it is cheap here because the candidate set is already in memory and the
+    /// index already stores every item's full hash -- it just was not using it for ranking.
+    ///
+    /// The two signals genuinely differ: a variant one bit away at the most significant position
+    /// shares no prefix at all, while one bit away at the least significant position shares 63. So
+    /// prefix ranking orders some pairs backwards relative to the edit size -- measured in
+    /// `examples/ranking_margin.rs` at 22.3% of comparable pairs. Re-ranking by Hamming removes
+    /// those inversions within the candidate set.
+    ///
+    /// The candidate set itself is still prefix-filtered: an item whose first differing bit is
+    /// above [`MIN_COLLISION_BITS`] is never a candidate, however small its Hamming distance. So
+    /// this improves the ordering of what the index finds; it does not make the index a distance
+    /// oracle over the whole corpus.
+    pub fn collide_by_hamming(&self, tokens: &[&str]) -> Vec<Collision<'_>> {
+        let mut results = self.collide(tokens);
+        results.sort_by(|a, b| a.hamming.cmp(&b.hamming));
+        results
+    }
+
+    /// Like [`CollisionIndex::collide_text`], but ranks by Hamming distance between the full
+    /// hashes. See [`CollisionIndex::collide_by_hamming`] for the difference between the two
+    /// signals.
+    pub fn collide_by_hamming_text(&self, text: &str) -> Vec<Collision<'_>> {
+        let units = self.tokenizer.tokenize(text);
+        let refs: Vec<&str> = units.iter().map(|(unit, _)| unit.as_str()).collect();
+        self.collide_by_hamming(&refs)
     }
 
     /// Convenience for free text, expanded with this index's shingle size.
@@ -858,6 +906,85 @@ mod tests {
             results.iter().all(|c| c.id != "far" || c.shared_bits <= results[0].shared_bits),
             "the unrelated item must not outrank the near duplicate"
         );
+    }
+
+    /// The Hamming re-rank: the prefix buckets find the candidates, the full hashes order them.
+    ///
+    /// The two signals are not the same -- a variant one bit away at the most significant position
+    /// shares no prefix, while one bit away at the least significant position shares 63. So the
+    /// prefix ordering can put a farther document above a nearer one (22.3% of comparable pairs,
+    /// measured in `examples/ranking_margin.rs`). `collide_by_hamming` re-ranks the same candidates
+    /// by the full-hash distance, which is what a linear scan would give.
+    #[test]
+    fn collide_by_hamming_orders_the_candidates_by_full_hash_distance() {
+        let mut index = CollisionIndex::new();
+        // Realistic-length synthetic documents, so the majority vote is decided by content rather
+        // than noise. `near` changes one token; `far` changes twenty of the eighty. Both are
+        // near-duplicates of the base and so both survive the prefix filter -- an unrelated
+        // document would not, and would make the test assert nothing about ordering.
+        let base: Vec<String> = (0..80).map(|i| format!("w{i}")).collect();
+        let near = {
+            let mut v = base.clone();
+            v[79] = "x79".to_string();
+            v
+        };
+        let far = {
+            let mut v = base.clone();
+            for (i, slot) in v.iter_mut().enumerate().skip(60) {
+                *slot = format!("x{i}");
+            }
+            v
+        };
+        index.insert_text("base", &base.join(" "));
+        index.insert_text("near", &near.join(" "));
+        index.insert_text("far", &far.join(" "));
+
+        let by_prefix = index.collide_text(&base.join(" "));
+        let by_hamming = index.collide_by_hamming_text(&base.join(" "));
+        assert!(!by_hamming.is_empty());
+
+        // The re-rank changes the order, not the candidate set: the prefix buckets decide which
+        // items are found, and the full hashes only order them.
+        let mut prefix_ids: Vec<&str> = by_prefix.iter().map(|c| c.id).collect();
+        let mut hamming_ids: Vec<&str> = by_hamming.iter().map(|c| c.id).collect();
+        prefix_ids.sort_unstable();
+        hamming_ids.sort_unstable();
+        assert_eq!(
+            prefix_ids, hamming_ids,
+            "re-ranking must not change which items are candidates"
+        );
+
+        // The Hamming ordering is non-decreasing, and the field is populated from the stored full
+        // hashes rather than left at the sentinel.
+        for pair in by_hamming.windows(2) {
+            assert!(
+                pair[0].hamming <= pair[1].hamming,
+                "Hamming ranking must be non-decreasing: {} ({}) before {} ({})",
+                pair[0].id,
+                pair[0].hamming,
+                pair[1].id,
+                pair[1].hamming
+            );
+        }
+        assert!(by_hamming.iter().all(|c| c.hamming != u32::MAX));
+
+        // The identical document is at distance 0 and ranks first -- the ordering the edit size
+        // implies, which the prefix ordering does not guarantee.
+        assert_eq!(by_hamming[0].id, "base", "the identical document must rank first");
+        assert_eq!(by_hamming[0].hamming, 0, "the identical document is at distance 0");
+        // And the near duplicate, when it survives the prefix filter, is closer than the farther
+        // one.
+        if let (Some(near), Some(far)) = (
+            by_hamming.iter().find(|c| c.id == "near"),
+            by_hamming.iter().find(|c| c.id == "far"),
+        ) {
+            assert!(
+                near.hamming < far.hamming,
+                "near {} must be closer than far {}",
+                near.hamming,
+                far.hamming
+            );
+        }
     }
 
     #[test]
