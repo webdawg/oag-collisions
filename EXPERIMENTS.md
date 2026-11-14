@@ -1346,3 +1346,68 @@ the ranking directly, because the ranking does not use the margin. It uses the f
 which is a weaker signal than the total bits moved -- and the total bits moved was already stored
 and unused. The ranking signal is now the stronger of the two, at no cost. What remains open is the
 recall limit of the prefix filter, which no re-rank can touch.
+
+## EXP-025 — Widening the prefix filter's recall with multi-probe
+
+**Repository:** `oag-collisions`
+**Hypothesis.** EXP-024 fixed the ranking signal but not the candidate set: the prefix filter
+excludes 61% of variants, and the exclusion is steepest for the far near-duplicates. The standard
+LSH answer is **multi-probe** -- also query the prefixes that differ from the query's in a few
+high-order bits. The question is what it buys and what it costs.
+
+**Procedure.** `crates/oag-collisions/examples/recall.rs`. An 800-token base, window sampling at
+width 3 with a budget of 200, 20 variants at each edit distance from 2 to 256 tokens (160
+near-duplicates), and 160 unrelated documents. For each scheme: the fraction of near-duplicates
+found (recall), the fraction of unrelated documents found (false positives), and the probe count.
+The source is an LCG, so a run is exactly reproducible.
+
+**Result: the trade, measured.**
+
+| scheme | probes | near found | unrelated found | total |
+|---|---|---|---|---|
+| standard (no extra probes) | 57 | 62/160 (38.8%) | 1/160 (0.6%) | 63 |
+| multi-probe, 1 flip | 65 | **118/160 (73.8%)** | 5/160 (3.1%) | 122 |
+| multi-probe, 2 flips | 93 | 143/160 (89.4%) | 22/160 (13.8%) | 163 |
+
+The 1-flip scheme nearly doubles the recall for 8 extra probes, and the false-positive rate rises
+from 0.6% to 3.1% -- **14 near-duplicates recovered per unrelated document admitted**. The 2-flip
+scheme adds more recall but at a worse ratio: 3.9 near per unrelated, and the unrelated rate
+quadruples to 13.8%.
+
+**The recall that matters is at the near end.** Per edit distance:
+
+| distance | standard | 1 flip | 2 flips |
+|---|---|---|---|
+| 2 | 14/20 | **20/20** | 20/20 |
+| 4 | 14/20 | **20/20** | 20/20 |
+| 8 | 12/20 | **20/20** | 20/20 |
+| 16 | 10/20 | 18/20 | 19/20 |
+| 32 | 4/20 | 12/20 | 17/20 |
+| 64 | 4/20 | 11/20 | 14/20 |
+| 128 | 3/20 | 10/20 | 18/20 |
+| 256 | 1/20 | 7/20 | 15/20 |
+
+The 1-flip scheme recovers **every** variant at the distances where a miss is a near-duplicate
+lost (2, 4, 8 tokens -- 100% at all three), and most at 16 and 32. That is the recall that
+matters: a lost near-duplicate is a false negative a deployment actually feels, while a far
+near-duplicate recovered at 128 tokens is a weaker inference.
+
+**The fix.** `CollisionIndex::collide_multi_probe` (and `_text`) probes the query's prefixes at
+every level, plus the length-[`MIN_COLLISION_BITS`] prefixes that differ from the query's in up to
+`max_flips` of the first `probe_bits` bits. `max_flips = 0` is exactly the standard ladder (a test
+pins this), extra probes never narrow the candidate set (a test pins this too), and every scheme
+is ordered by Hamming distance.
+
+**Honest limits.** One document size, one edit model, one window width, one corpus. The unrelated
+documents are synthetic and share a token-range prefix with each other, so the false-positive rate
+is a property of this corpus. The probe counts are bucket lookups; the real cost also includes the
+items those buckets return. The recall at 256 tokens is still 15/20 with 2 flips -- the multi-probe
+does not make the index a distance oracle, it widens the net.
+
+**What this closes.** The recall limit EXP-024 left open is answered: a 1-flip multi-probe
+quadruples the probe count only slightly (57 to 65) and recovers the near end completely, at 14
+near-duplicates per unrelated document. The recommendation is concrete: use
+`collide_multi_probe` with `max_flips = 1` as the default, and keep the plain ladder for callers
+that need the strictest false-positive bound. What remains open is the far end -- no probe count
+short of a full scan recovers a 256-token variant reliably, and whether that matters depends on
+the corpus.

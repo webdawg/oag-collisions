@@ -291,6 +291,17 @@ pub fn char_shingles(text: &str, n: usize) -> Vec<String> {
 /// floor for "these might be related".
 pub const MIN_COLLISION_BITS: u32 = 8;
 
+/// Longest shared prefix between two hashes: the number of leading bits that agree. Identical
+/// hashes share all 64; hashes differing first at the most significant bit share none.
+fn shared_prefix(a: u64, b: u64) -> u32 {
+    let diff = a ^ b;
+    if diff == 0 {
+        HASH_BITS
+    } else {
+        diff.leading_zeros()
+    }
+}
+
 /// A locality-sensitive hash of a token multiset.
 ///
 /// Classic SimHash: weight each bit position by how many tokens' hashes have that bit set, then
@@ -615,6 +626,74 @@ impl CollisionIndex {
         let units = self.tokenizer.tokenize(text);
         let refs: Vec<&str> = units.iter().map(|(unit, _)| unit.as_str()).collect();
         self.collide_by_hamming(&refs)
+    }
+
+    /// Like [`CollisionIndex::collide_by_hamming`], but also probes prefixes that differ from the
+    /// query's in the first `probe_bits` positions, up to `max_flips` flips.
+    ///
+    /// The prefix filter is what limits recall: an item whose first differing bit is above
+    /// [`MIN_COLLISION_BITS`] is invisible at every level, however few bits moved -- measured in
+    /// `examples/ranking_margin.rs` as 61% of variants excluded. Probing the
+    /// length-[`MIN_COLLISION_BITS`] prefixes that differ from the query's in a few high-order bits
+    /// recovers those items. This is the standard multi-probe LSH refinement.
+    ///
+    /// `probe_bits` is clamped to [`MIN_COLLISION_BITS`] and `max_flips` to `probe_bits`. The extra
+    /// probe count is `sum_{k=1..=max_flips} C(probe_bits, k)` on top of the standard ladder, so
+    /// `max_flips = 2` with the default `probe_bits = 8` is 36 extra lookups. Every extra probe is
+    /// a bucket that can contain unrelated items, so the recall gain is bought with false
+    /// positives -- `examples/recall.rs` measures both sides.
+    pub fn collide_multi_probe(
+        &self,
+        tokens: &[&str],
+        probe_bits: u32,
+        max_flips: u32,
+    ) -> Vec<Collision<'_>> {
+        let hash = simhash(tokens);
+        let deepest = self.prefix_levels.min(HASH_BITS);
+        let mut candidates: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for length in MIN_COLLISION_BITS..=deepest {
+            let prefix = hash >> (HASH_BITS - length);
+            if let Some(bucket) = self.buckets.get(&(length, prefix)) {
+                candidates.extend(bucket.iter().map(String::as_str));
+            }
+        }
+        let probe_bits = probe_bits.min(MIN_COLLISION_BITS);
+        let max_flips = max_flips.min(probe_bits);
+        let base = hash >> (HASH_BITS - MIN_COLLISION_BITS);
+        for mask in 1..(1_u64 << probe_bits) {
+            if mask.count_ones() > max_flips {
+                continue;
+            }
+            if let Some(bucket) = self.buckets.get(&(MIN_COLLISION_BITS, base ^ mask)) {
+                candidates.extend(bucket.iter().map(String::as_str));
+            }
+        }
+        let mut results: Vec<Collision<'_>> = candidates
+            .iter()
+            .filter_map(|id| {
+                self.hashes.get(*id).map(|item| Collision {
+                    id,
+                    shared_bits: shared_prefix(hash, *item),
+                    hamming: (hash ^ item).count_ones(),
+                })
+            })
+            .collect();
+        results.sort_by(|a, b| a.hamming.cmp(&b.hamming));
+        results
+    }
+}
+
+impl CollisionIndex {
+    /// Text form of [`CollisionIndex::collide_multi_probe`].
+    pub fn collide_multi_probe_text(
+        &self,
+        text: &str,
+        probe_bits: u32,
+        max_flips: u32,
+    ) -> Vec<Collision<'_>> {
+        let units = self.tokenizer.tokenize(text);
+        let refs: Vec<&str> = units.iter().map(|(unit, _)| unit.as_str()).collect();
+        self.collide_multi_probe(&refs, probe_bits, max_flips)
     }
 
     /// Convenience for free text, expanded with this index's shingle size.
@@ -984,6 +1063,52 @@ mod tests {
                 near.hamming,
                 far.hamming
             );
+        }
+    }
+
+    /// The multi-probe contract: zero flips is exactly the standard ladder, extra flips never
+    /// narrow the candidate set, and every scheme is ordered by Hamming distance.
+    #[test]
+    fn multi_probe_zero_flips_matches_the_ladder_and_extra_flips_never_narrow_it() {
+        let mut index = CollisionIndex::new();
+        let base: Vec<String> = (0..80).map(|i| format!("w{i}")).collect();
+        index.insert_text("base", &base.join(" "));
+        for distance in [2_usize, 4, 8, 16] {
+            for k in 0..5 {
+                let mut changed = base.clone();
+                for (slot_index, slot) in changed.iter_mut().enumerate().skip(10 * k).take(distance) {
+                    *slot = format!("x{slot_index}");
+                }
+                index.insert_text(&format!("d{distance}-{k}"), &changed.join(" "));
+            }
+        }
+        let query = base.join(" ");
+
+        let standard = index.collide_text(&query);
+        let zero_flip = index.collide_multi_probe_text(&query, MIN_COLLISION_BITS, 0);
+        let one_flip = index.collide_multi_probe_text(&query, MIN_COLLISION_BITS, 1);
+
+        let standard_ids: std::collections::HashSet<&str> =
+            standard.iter().map(|c| c.id).collect();
+        let zero_flip_ids: std::collections::HashSet<&str> =
+            zero_flip.iter().map(|c| c.id).collect();
+        let one_flip_ids: std::collections::HashSet<&str> =
+            one_flip.iter().map(|c| c.id).collect();
+        assert_eq!(
+            standard_ids, zero_flip_ids,
+            "zero flips must be exactly the standard ladder"
+        );
+        assert!(
+            standard_ids.is_subset(&one_flip_ids),
+            "extra probes must never narrow the candidate set"
+        );
+        for list in [&zero_flip, &one_flip] {
+            for pair in list.windows(2) {
+                assert!(
+                    pair[0].hamming <= pair[1].hamming,
+                    "every multi-probe scheme must be ordered by Hamming distance"
+                );
+            }
         }
     }
 

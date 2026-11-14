@@ -20,6 +20,12 @@ the same candidates by the full-hash Hamming distance, which tracks the edit siz
 22.3% of pairs the prefix ordering gets backwards. The index already stores every item's full
 hash, so the re-rank costs nothing asymptotically. See `EXPERIMENTS.md` EXP-024.
 
+The filter is also a *recall* limit: an item whose first differing bit is above bit 8 is
+invisible at every level. `collide_multi_probe` widens it by also querying the prefixes that
+differ from the query's in a few high-order bits. With one flip it recovers every variant at the
+2-, 4- and 8-token edit distances (from 62/160 to 118/160 overall) for 8 extra probes, at 14
+near-duplicates per unrelated document admitted. See `EXPERIMENTS.md` EXP-025.
+
 ```
 "the rust async runtime provides scheduled task execution"
 "the rust async runtime provides scheduled task execution, and is fast"
