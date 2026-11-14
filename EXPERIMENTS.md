@@ -1411,3 +1411,87 @@ near-duplicates per unrelated document. The recommendation is concrete: use
 that need the strictest false-positive bound. What remains open is the far end -- no probe count
 short of a full scan recovers a 256-token variant reliably, and whether that matters depends on
 the corpus.
+
+## EXP-026 — A second independent hash is not worth its memory
+
+**Repository:** `oag-collisions`
+**Hypothesis.** EXP-025 left the far end of the recall curve limited. A near-duplicate is missed
+because the bits it happened to flip are high-order. A second hash built from a different domain
+flips different bits, so the two should miss independently and their union should recover more.
+
+**Procedure.** `crates/oag-collisions/examples/dual_hash.rs`. The same corpus as EXP-025 (an
+800-token base, window 3, budget 200, 20 variants at each edit distance 2-256, 160 unrelated
+documents). `simhash_with_domain` builds a hash from a domain-separated BLAKE3, so two domains give
+two independent hashes of the same units. For every variant: the recall of hash A, of hash B, and
+of their union.
+
+**Result.**
+
+| scheme | near-duplicates found | unrelated found |
+|---|---|---|
+| hash A alone | 117/160 (73.1%) | 0/160 (0.0%) |
+| hash B alone | 36/160 (22.5%) | 0/160 (0.0%) |
+| union of A and B | 121/160 (75.6%) | 0/160 (0.0%) |
+
+The union gains 2.5 points over the better hash. The two hashes' recalls differ by 50 points on the
+same corpus, and the union is close to the independence prediction
+`1 - (1 - 0.731)(1 - 0.225) = 0.791`, so the misses are roughly independent -- the gain is bounded
+by the better hash, and one hash happened to be poor.
+
+**Conclusion: not worth it.** Doubling the index memory for 2.5 points of recall, when the
+variance across hashes is 50 points, is a bad trade. The recall is not a property of the edit model
+that a second hash can stabilise; it is a property of the base document's near-zero bit
+distribution, which EXP-027 measures directly. `simhash_with_domain` stays as a public primitive
+because it is the honest way to ask the question, and the answer is recorded here rather than left
+as an assumption.
+
+**Honest limits.** One base document, two domains. The 50-point spread between the two hashes is
+the finding; a different pair of domains would give a different pair of recalls, and the union's
+gain would still be bounded by the better one.
+
+---
+
+## EXP-027 — The recall is a property of the base document, and the multi-probe stabilises it
+
+**Repository:** `oag-collisions`
+**Hypothesis.** EXP-026 found two hashes of one corpus recalling 73% and 22%. If the recall is a
+property of the base document's near-zero bit distribution rather than of the edit, then the
+prefix ladder's recall is not a stable quantity and a deployment cannot quote one number for it.
+
+**Procedure.** `crates/oag-collisions/examples/recall_variance.rs`. 24 base documents (800 tokens
+each, alphanumeric-only tokens so the tokenizer does not split them), window 3, budget 200, and 24
+variants at a 32-token edit each. For every base: the recall under the standard ladder, under a
+1-flip multi-probe, and under a 2-flip multi-probe. The source is an LCG, so a run is exactly
+reproducible.
+
+**Result: the recall varies widely across base documents, and the multi-probe both raises and
+stabilises it.**
+
+| scheme | min | median | max | std dev |
+|---|---|---|---|---|
+| standard ladder | 20.8% | 50.0% | 95.8% | 4.2 variants |
+| 1-flip multi-probe | 66.7% | 91.7% | 100.0% | 2.5 variants |
+| 2-flip multi-probe | 91.7% | 100.0% | 100.0% | 0.7 variants |
+
+The standard ladder's recall on the same edit model ranges from one base in five to nearly all.
+The 2-flip multi-probe makes it nearly deterministic -- every base recalls at least 19 of 24
+variants, and the standard deviation falls from 4.2 to 0.7.
+
+**The mechanism, stated precisely.** The prefix ladder finds an item iff its first differing bit
+from the query is at or below bit 8. A near-duplicate's flipped bits are the base document's
+near-zero bit positions -- the bits where the majority-vote sum is within one of zero. Those
+positions are essentially random per base document, so the recall is random per base document.
+The multi-probe perturbs the high-order bits, which is exactly what it takes to cross a shallow
+near-zero bit.
+
+**What this closes, and what it costs.** The recall is not a stable quantity, so a deployment
+should measure it per corpus rather than trust a single figure. The multi-probe is the mechanism
+that makes it stable, and EXP-025 measured its cost: the 1-flip scheme is 8 extra probes and 3.1%
+unrelated hits, the 2-flip scheme is 36 extra probes and 13.8%. The choice between them is now a
+stated trade -- the 1-flip for a bounded false-positive budget, the 2-flip when the recall must be
+predictable.
+
+**Honest limits.** One edit model (a 32-token run), one document size, one window width, one
+budget. The 24 base documents are synthetic and share a token shape, so the spread is a property of
+this corpus. The multi-probe rows are computed from the condition the index uses, not from a
+built index; EXP-025 measured the built index and its per-distance table agrees.

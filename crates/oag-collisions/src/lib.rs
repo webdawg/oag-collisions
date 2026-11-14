@@ -323,12 +323,28 @@ pub fn simhash(tokens: &[&str]) -> u64 {
 /// A weight of 0 removes a unit from the vote entirely; negative weights are accepted and simply
 /// vote the other way, which is useful for down-weighting a known-noise unit.
 pub fn simhash_weighted(units: &[(&str, i32)]) -> u64 {
+    simhash_with_domain(b"", units)
+}
+
+/// [`simhash_weighted`] with a domain separator, so two *independent* hashes of the same units can
+/// be built.
+///
+/// The index ranks and filters on one hash. A near-duplicate whose first differing bit under that
+/// hash is high-order is invisible to the prefix ladder, however few bits moved. A second hash
+/// built from a different domain has its differing bits in different positions, so the two miss
+/// independently -- which is what makes a redundant index a recall mechanism rather than a
+/// repetition. The domains are caller-chosen byte strings; the empty domain is [`simhash_weighted`]
+/// itself.
+pub fn simhash_with_domain(domain: &[u8], units: &[(&str, i32)]) -> u64 {
     let mut weights = [0i32; HASH_BITS as usize];
     for (token, weight) in units {
         if *weight == 0 {
             continue;
         }
-        let digest = blake3::hash(token.as_bytes());
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(domain);
+        hasher.update(token.as_bytes());
+        let digest = hasher.finalize();
         let bits = u64::from_le_bytes(digest.as_bytes()[..8].try_into().unwrap());
         for (position, slot) in weights.iter_mut().enumerate() {
             let bit = (bits >> position) & 1;

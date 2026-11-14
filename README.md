@@ -26,6 +26,13 @@ differ from the query's in a few high-order bits. With one flip it recovers ever
 2-, 4- and 8-token edit distances (from 62/160 to 118/160 overall) for 8 extra probes, at 14
 near-duplicates per unrelated document admitted. See `EXPERIMENTS.md` EXP-025.
 
+The recall is also a property of the *base document*, not of the edit: the flipped bits are the
+base's near-zero majority-vote positions, which are essentially random per document. Across 24
+base documents the standard ladder recalled 21%-96% of the same 32-token edits (median 50%); the
+1-flip multi-probe raised that to 67%-100% and the 2-flip to 92%-100% with a standard deviation of
+0.7 variants. A deployment should measure the recall per corpus rather than trust a single
+figure, and choose the probe budget by how predictable the recall must be. See EXP-027.
+
 ```
 "the rust async runtime provides scheduled task execution"
 "the rust async runtime provides scheduled task execution, and is fast"
