@@ -1099,3 +1099,96 @@ for the wrong reason: the trials are not independent, they share the document.
 "windows dominates" is supported rather than asserted. The remaining open question is the one
 the previous entry named: the unit budget's optimum is grid-dependent and is not a specifiable
 constant.
+
+## EXP-023 — The detection outcome as a distribution, not a peak
+
+**Repository:** `oag-collisions`
+**Hypothesis.** EXP-022 withdrew the "optimal budget fraction" claim because the rate-over-budget
+curve is jagged enough that the peak is a property of the measurement grid. The follow-up it left
+open: measure the **distribution** of detection outcomes over many (budget, position, seed) triples
+at a fixed size, reported as a histogram rather than a single rate, to show whether the jaggedness
+is a few outlier budgets or the normal case.
+
+**Procedure.** `crates/oag-collisions/examples/distribution.rs`. An 800-token document, a 2-token
+edit, window sampling at width 3 (the scheme EXP-016/EXP-017 settled on). A fine budget grid (every
+10 units from 10 to 200), 114 edit positions (every 7th token), 5 seeds per position -- 570 trials
+per budget. The base tokenization is computed once per budget, so the run finishes in about 20s.
+The source is an LCG, so a run is exactly reproducible.
+
+**Result: the rate over a fine budget grid.**
+
+| budget | detected | missed | rate | 95% CI |
+|---|---|---|---|---|
+| 10 | 30 | 540 | 5.3% | 3.7%-7.4% |
+| 20 | 60 | 510 | 10.5% | 8.3%-13.3% |
+| 30 | 90 | 480 | 15.8% | 13.0%-19.0% |
+| 40 | 113 | 457 | 19.8% | 16.8%-23.3% |
+| 50 | 145 | 425 | 25.4% | 22.0%-29.2% |
+| 60 | 283 | 287 | 49.6% | 45.6%-53.7% |
+| 70 | 195 | 375 | 34.2% | 30.4%-38.2% |
+| 80 | 190 | 380 | 33.3% | 29.6%-37.3% |
+| 90 | 253 | 317 | 44.4% | 40.4%-48.5% |
+| 100 | 282 | 288 | 49.5% | 45.4%-53.6% |
+| 110 | 282 | 288 | 49.5% | 45.4%-53.6% |
+| 120 | 548 | 22 | 96.1% | 94.2%-97.4% |
+| 130 | 548 | 22 | 96.1% | 94.2%-97.4% |
+| 140 | 356 | 214 | 62.5% | 58.4%-66.3% |
+| 150 | 356 | 214 | 62.5% | 58.4%-66.3% |
+| 160 | 401 | 169 | 70.4% | 66.5%-74.0% |
+| 170 | 401 | 169 | 70.4% | 66.5%-74.0% |
+| 180 | 401 | 169 | 70.4% | 66.5%-74.0% |
+| 190 | 401 | 169 | 70.4% | 66.5%-74.0% |
+| 200 | 498 | 72 | 87.4% | 84.4%-89.8% |
+
+**The jaggedness is the normal case, not a few outliers.** 10 of the 19 adjacent budget pairs
+differ by more than the sum of their Wilson half-widths, so the two rates are distinguishable.
+The largest steps are 110->120 (+46.7 points), 130->140 (+33.7), 50->60 (+24.2) and 190->200
+(+17.0). A deployment cannot read this curve as "a larger budget is smoothly better": budget 120
+detects 96.1% and budget 140 detects 62.5%, so *increasing* the budget by 20 units costs 34 points.
+
+**The margin distribution: most detections are one bit away from a miss.**
+
+| budget | 0 bits | 1-2 bits | 3-5 bits | 6-10 bits | 11+ bits |
+|---|---|---|---|---|---|
+| 50 | 74.6% | 2.5% | 15.8% | 7.2% | 0.0% |
+| 100 | 50.5% | 17.9% | 29.1% | 2.5% | 0.0% |
+| 200 | 12.6% | 60.4% | 26.8% | 0.2% | 0.0% |
+
+At budget 200, 60.4% of the *detections* move only 1-2 bits. A 1-bit detection is a single flipped
+bit away from not being detected at all, so the rate is a thin margin over chance for most
+trials -- not a comfortable one.
+
+**The misses are positionally concentrated, not spread.** At budget 100 the per-position miss
+rate ranges from 0.0% to 100.0% with a standard deviation of 49.1 points, against a mean of 50.5%.
+The variance is at the mean, so the misses are not an evenly-spread property of the budget; they
+fall on particular positions. This is a positional blind spot, the thing EXP-016's window scheme
+was supposed to remove.
+
+**The mechanism, stated precisely.** An edit is detected only if the changed unit flips at least
+one bit's majority vote. Sampling a window is necessary but not sufficient: with 200 units, one
+changed unit often leaves every bit's margin where it was. So the detection rate is **not** the
+window coverage (`3 * budget / tokens`, which would be 75% at budget 200); it is the probability
+that the changed units cross a bit's margin. That is why the rate moves in steps rather than
+tracking the budget smoothly, and why the margin histogram is dominated by 1-2 bits.
+
+**A methodological trap, recorded because it produced a plausible-looking wrong answer.** The
+first version of this example sampled edit positions every 16 tokens. The window stride at budget
+50 is `ceil(798/50) = 16`, so every sampled position was a sampled window's start -- the
+measurement reported 99.8% detection at budget 50, which is the coverage of window *starts*, not
+of edits. A position step must be coprime with the stride (7 is coprime with 16, 8 and 4), or the
+sample is aligned with the very structure it is measuring. This is the same class of error as
+reading a rate from trials that share one document: the measurement grid can manufacture the
+result.
+
+**Honest limits.** One document size, one edit model, one tokenizer. The trials share the
+document, so the Wilson interval is narrow for the wrong reason -- it bounds the (position, seed)
+grid, not the corpus. The position sample is 114 of 798 positions. The margin histogram is
+bucketed, so the exact bit counts within a bucket are not reported.
+
+**What this closes.** The planned follow-up is done: the jaggedness is the normal case, the
+detections are mostly thin-margin, and the misses are positionally concentrated. The practical
+guidance is now stronger than "a budget in the 25-50% range is defensible": a deployment should
+sweep the budget against its own documents *and* report the margin distribution, because the rate
+alone hides that most detections are 1-2 bits. The remaining open question is the positional
+blind spot: why the window scheme, which has no periodic blind spot, still concentrates its
+misses at particular positions.
