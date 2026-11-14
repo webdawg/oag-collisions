@@ -1,0 +1,7 @@
+# Build artifacts -- never tracked. The pruner keeps target/ bounded at 5
+# generations; committing it would record every superseded build.
+target/
+
+# Python tooling bytecode
+__pycache__/
+*.pyc
